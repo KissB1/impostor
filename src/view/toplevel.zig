@@ -8,6 +8,7 @@ const wlr = @import("wlroots");
 const xkb = @import("xkbcommon");
 
 const gpa = std.heap.c_allocator;
+
 pub const Toplevel = struct {
     server: *Server,
     link: wl.list.Link = undefined,

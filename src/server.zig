@@ -11,6 +11,7 @@ const gpa = std.heap.c_allocator;
 pub const Keyboard = @import("./input/keyboard.zig").Keyboard;
 pub const Output = @import("./output/output.zig").Output;
 pub const Toplevel = @import("./view/toplevel.zig").Toplevel;
+pub const Popup = @import("./view/popup.zig").Popup;
 
 pub const Server = struct {
     wl_server: *wl.Server,
@@ -575,28 +576,5 @@ pub const Server = struct {
         var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, gpa);
         child.env_map = &env_map;
         try child.spawn();
-    }
-};
-
-const Popup = struct {
-    xdg_popup: *wlr.XdgPopup,
-
-    commit: wl.Listener(*wlr.Surface) = .init(handleCommit),
-    destroy: wl.Listener(void) = .init(handleDestroy),
-
-    fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
-        const popup: *Popup = @fieldParentPtr("commit", listener);
-        if (popup.xdg_popup.base.initial_commit) {
-            _ = popup.xdg_popup.base.scheduleConfigure();
-        }
-    }
-
-    fn handleDestroy(listener: *wl.Listener(void)) void {
-        const popup: *Popup = @fieldParentPtr("destroy", listener);
-
-        popup.commit.link.remove();
-        popup.destroy.link.remove();
-
-        gpa.destroy(popup);
     }
 };
