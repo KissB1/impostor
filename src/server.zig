@@ -1,3 +1,8 @@
+pub const lua = @cImport({
+    @cInclude("lua.h");
+    @cInclude("lualib.h");
+    @cInclude("lauxlib.h");
+});
 const std = @import("std");
 const posix = std.posix;
 
@@ -12,6 +17,7 @@ pub const Keyboard = @import("./input/keyboard.zig").Keyboard;
 pub const Output = @import("./output/output.zig").Output;
 pub const Toplevel = @import("./view/toplevel.zig").Toplevel;
 pub const Popup = @import("./view/popup.zig").Popup;
+const lua_api = @import("./lua/methods.zig");
 
 pub const Server = struct {
     wl_server: *wl.Server,
@@ -57,7 +63,16 @@ pub const Server = struct {
     focused_color: [4]f32,
     unfocused_color: [4]f32,
 
+    // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
+    lua_state: *lua.lua_State,
+
     pub fn init(server: *Server) !void {
+        // Lua must be initialized first so the client can connect to the server at startup
+
+        const L = lua.luaL_newstate() orelse return error.LuaInitFailed;
+        lua.luaL_openlibs(L);
+        lua_api.registerAll(L, server);
+
         const wl_server = try wl.Server.create();
         const loop = wl_server.getEventLoop();
         const backend = try wlr.Backend.autocreate(loop, null);
@@ -66,6 +81,7 @@ pub const Server = struct {
         const scene = try wlr.Scene.create();
         server.* = .{
             .wl_server = wl_server,
+            .lua_state = L,
             .backend = backend,
             .renderer = renderer,
             .allocator = try wlr.Allocator.autocreate(backend, renderer),
@@ -108,6 +124,9 @@ pub const Server = struct {
     }
 
     pub fn deinit(server: *Server) void {
+        // shut down lua first to not get segmentation error
+        lua.lua_close(server.lua_state);
+
         server.wl_server.destroyClients();
 
         server.new_input.link.remove();
@@ -564,17 +583,20 @@ pub const Server = struct {
         }
         return true;
     }
-    fn spawnProgram(server: *Server, cmd: []const u8) !void {
-        var env_map = try std.process.getEnvMap(gpa);
-        defer env_map.deinit();
 
-        // 1. Tell kitty which server to connect to
-        //    (Assumes you added 'socket_name' to Server struct)
+    pub fn spawnProgram(server: *Server, cmd: []const u8) !void {
+        // Create an arena allocator just for the lifespan of this spawn command
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        var env_map = try std.process.getEnvMap(allocator);
         try env_map.put("WAYLAND_DISPLAY", server.socket_name);
 
-        // 2. Spawn the child process
-        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, gpa);
+        var child = std.process.Child.init(&[_][]const u8{ "/bin/sh", "-c", cmd }, allocator);
         child.env_map = &env_map;
+
+        // Spawn the process (it runs asynchronously)
         try child.spawn();
     }
 };

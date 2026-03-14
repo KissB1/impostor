@@ -5,6 +5,7 @@ const wl = @import("wayland").server.wl;
 const wlr = @import("wlroots");
 
 const Server = @import("server.zig").Server;
+const lua = @import("server.zig").lua;
 const gpa = std.heap.c_allocator; // Use the C allocator (malloc/free)
 //
 pub fn main() anyerror!void {
@@ -37,7 +38,27 @@ pub fn main() anyerror!void {
         child.env_map = &env_map;
         try child.spawn(); // Launch the startup command
     }
+    // --- EXECUTE LUA SCRIPT ---
+    const filePath = "/home/kissb/zig/impostor/config.lua";
 
+    // 1. Load the Lua file
+    if (lua.luaL_loadfilex(server.lua_state, filePath, null) != lua.LUA_OK) {
+        // Use lua_tolstring instead of lua_tostring
+        const err_msg = lua.lua_tolstring(server.lua_state, -1, null);
+        std.log.err("Lua Load Error: {s}", .{err_msg});
+        lua.lua_pop(server.lua_state, 1); // Clean up the stack
+    }
+    // 2. Execute the loaded file
+    else if (lua.lua_pcallk(server.lua_state, 0, lua.LUA_MULTRET, 0, 0, null) != lua.LUA_OK) {
+        // Use lua_tolstring instead of lua_tostring
+        const err_msg = lua.lua_tolstring(server.lua_state, -1, null);
+        std.log.err("Lua Runtime Error: {s}", .{err_msg});
+        lua.lua_pop(server.lua_state, 1); // Clean up the stack
+    }
+    // Success!
+    else {
+        std.log.info("Lua config loaded successfully!", .{});
+    }
     // Start the wlroots backend (e.g., DRM, X11, Wayland)
     try server.backend.start();
 

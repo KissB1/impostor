@@ -28,13 +28,12 @@ pub fn build(b: *std.Build) void {
     wlroots.addImport("xkbcommon", xkbcommon);
     wlroots.addImport("pixman", pixman);
 
-    wlroots.addImport("wayland",wayland);
+    wlroots.addImport("wayland", wayland);
     wlroots.addImport("xkbcommon", xkbcommon);
     wlroots.addImport("pixman", pixman);
 
     wlroots.resolved_target = target;
-    wlroots.linkSystemLibrary("wlroots-0.19",.{});
-
+    wlroots.linkSystemLibrary("wlroots-0.19", .{});
 
     const impostor = b.addExecutable(.{
         .name = "impostor", // You can change "my-compositor"
@@ -45,6 +44,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     impostor.linkLibC();
+    impostor.linkSystemLibrary("lua");
 
     impostor.root_module.addImport("wayland", wayland);
     impostor.root_module.addImport("xkbcommon", xkbcommon);
