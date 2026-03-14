@@ -8,6 +8,8 @@ const xkb = @import("xkbcommon");
 
 const gpa = std.heap.c_allocator;
 
+pub const Keyboard = @import("./input/keyboard.zig").Keyboard;
+
 pub const Server = struct {
     wl_server: *wl.Server,
     backend: *wlr.Backend,
@@ -166,7 +168,7 @@ pub const Server = struct {
             toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
 
             _ = toplevel.xdg_toplevel.setSize(window_width, window_height);
-            
+
             // Update border size immediately with the size we just set
             // This ensures the border is visible even before the client commits
             const border_width = server.border_width;
@@ -526,7 +528,7 @@ pub const Server = struct {
     ///
     ///
     /// TODO UPGRADE
-    fn handleKeybind(server: *Server, key: xkb.Keysym) bool {
+    pub fn handleKeybind(server: *Server, key: xkb.Keysym) bool {
         switch (@intFromEnum(key)) {
             // Exit the compositor
             xkb.Keysym.Escape => server.wl_server.terminate(),
@@ -764,89 +766,5 @@ const Popup = struct {
         popup.destroy.link.remove();
 
         gpa.destroy(popup);
-    }
-};
-
-const Keyboard = struct {
-    server: *Server,
-    link: wl.list.Link = undefined,
-    device: *wlr.InputDevice,
-
-    modifiers: wl.Listener(*wlr.Keyboard) = .init(handleModifiers),
-    key: wl.Listener(*wlr.Keyboard.event.Key) = .init(handleKey),
-    destroy: wl.Listener(*wlr.InputDevice) = .init(handleDestroy),
-
-    fn create(server: *Server, device: *wlr.InputDevice) !void {
-        const keyboard = try gpa.create(Keyboard);
-        errdefer gpa.destroy(keyboard);
-
-        keyboard.* = .{
-            .server = server,
-            .device = device,
-        };
-
-        const context = xkb.Context.new(.no_flags) orelse return error.ContextFailed;
-        defer context.unref();
-        var rules = xkb.RuleNames{
-            .rules = null,
-            .model = null,
-            .layout = "hu",
-            .variant = null,
-            .options = null,
-        };
-        const keymap = xkb.Keymap.newFromNames(context, &rules, .no_flags) orelse return error.KeymapFailed;
-        defer keymap.unref();
-
-        const wlr_keyboard = device.toKeyboard();
-        if (!wlr_keyboard.setKeymap(keymap)) return error.SetKeymapFailed;
-        wlr_keyboard.setRepeatInfo(25, 600);
-
-        wlr_keyboard.events.modifiers.add(&keyboard.modifiers);
-        wlr_keyboard.events.key.add(&keyboard.key);
-        device.events.destroy.add(&keyboard.destroy);
-
-        server.seat.setKeyboard(wlr_keyboard);
-        server.keyboards.append(keyboard);
-    }
-
-    fn handleModifiers(listener: *wl.Listener(*wlr.Keyboard), wlr_keyboard: *wlr.Keyboard) void {
-        const keyboard: *Keyboard = @fieldParentPtr("modifiers", listener);
-        keyboard.server.seat.setKeyboard(wlr_keyboard);
-        keyboard.server.seat.keyboardNotifyModifiers(&wlr_keyboard.modifiers);
-    }
-
-    fn handleKey(listener: *wl.Listener(*wlr.Keyboard.event.Key), event: *wlr.Keyboard.event.Key) void {
-        const keyboard: *Keyboard = @fieldParentPtr("key", listener);
-        const wlr_keyboard = keyboard.device.toKeyboard();
-
-        // Translate libinput keycode -> xkbcommon
-        const keycode = event.keycode + 8;
-
-        var handled = false;
-        if (wlr_keyboard.getModifiers().alt and event.state == .pressed) {
-            for (wlr_keyboard.xkb_state.?.keyGetSyms(keycode)) |sym| {
-                if (keyboard.server.handleKeybind(sym)) {
-                    handled = true;
-                    break;
-                }
-            }
-        }
-
-        if (!handled) {
-            keyboard.server.seat.setKeyboard(wlr_keyboard);
-            keyboard.server.seat.keyboardNotifyKey(event.time_msec, event.keycode, event.state);
-        }
-    }
-
-    fn handleDestroy(listener: *wl.Listener(*wlr.InputDevice), _: *wlr.InputDevice) void {
-        const keyboard: *Keyboard = @fieldParentPtr("destroy", listener);
-
-        keyboard.link.remove();
-
-        keyboard.modifiers.link.remove();
-        keyboard.key.link.remove();
-        keyboard.destroy.link.remove();
-
-        gpa.destroy(keyboard);
     }
 };
