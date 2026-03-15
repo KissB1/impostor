@@ -4,6 +4,20 @@ wm.log("Initializing Impostor WM...")
 wm.spawn("kitty")
 wm.retile()
 
-wm.log("1")
-wm.log("2")
-wm.log("3")
+wm.bind_key({ "Super", "Shift" }, "Return", function()
+    wm.log("Executing Super+Shift+Return macro!")
+    wm.spawn("kitty")
+end)
+
+-- Test a simple bind: Super + b opens the browser
+wm.bind_key({ "Super" }, "c", function()
+    wm.log("Opening code...")
+    wm.spawn("code")
+end)
+
+wm.bind_key({ "Super" }, "Escape", function()
+    wm.log("Shutting down compositor...")
+    wm.exit()
+end)
+
+wm.log("Config fully loaded.")

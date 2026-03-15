@@ -7,6 +7,7 @@ const wl = @import("wayland").server.wl;
 
 const wlr = @import("wlroots");
 const xkb = @import("xkbcommon");
+const keys = @import("keys.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -64,17 +65,31 @@ pub const Keyboard = struct {
 
         // Translate libinput keycode -> xkbcommon
         const keycode = event.keycode + 8;
-
         var handled = false;
-        if (wlr_keyboard.getModifiers().alt and event.state == .pressed) {
+
+        // We only check for compositor shortcuts when a key is PRESSED
+        if (event.state == .pressed) {
+            const mods = wlr_keyboard.getModifiers();
+
+            // Map wlroots state to our packed Zig struct instantly
+            const active_mods = keys.ModMask{
+                .shift = mods.shift,
+                .ctrl = mods.ctrl,
+                .alt = mods.alt,
+                .super = mods.logo,
+            };
+
+            // Check every symbol this physical key generates
             for (wlr_keyboard.xkb_state.?.keyGetSyms(keycode)) |sym| {
-                if (keyboard.server.handleKeybind(sym)) {
+                if (keyboard.server.executeKeybind(active_mods, sym)) {
                     handled = true;
                     break;
                 }
             }
         }
 
+        // If the compositor didn't intercept the shortcut (or if it's a key release),
+        // pass it down to the focused Wayland window (like Kitty or Zen-Browser).
         if (!handled) {
             keyboard.server.seat.setKeyboard(wlr_keyboard);
             keyboard.server.seat.keyboardNotifyKey(event.time_msec, event.keycode, event.state);

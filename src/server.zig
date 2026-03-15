@@ -18,6 +18,7 @@ pub const Output = @import("./output/output.zig").Output;
 pub const Toplevel = @import("./view/toplevel.zig").Toplevel;
 pub const Popup = @import("./view/popup.zig").Popup;
 const lua_api = @import("./lua/methods.zig");
+const keys = @import("./input/keys.zig");
 
 pub const Server = struct {
     wl_server: *wl.Server,
@@ -63,6 +64,9 @@ pub const Server = struct {
     focused_color: [4]f32,
     unfocused_color: [4]f32,
 
+    //keybind hashmap
+    keybinds: std.AutoHashMap(keys.Keybind, i32),
+
     // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
     lua_state: *lua.lua_State,
 
@@ -95,6 +99,7 @@ pub const Server = struct {
             .border_width = 4,
             .focused_color = .{ 1.0, 0.0, 0.0, 1.0 }, // red green blue alpha
             .unfocused_color = .{ 0.0, 0.0, 1.0, 1.0 },
+            .keybinds = std.AutoHashMap(keys.Keybind, i32).init(std.heap.c_allocator),
         };
 
         try server.renderer.initServer(wl_server);
@@ -141,7 +146,7 @@ pub const Server = struct {
         server.cursor_button.link.remove();
         server.cursor_axis.link.remove();
         server.cursor_frame.link.remove();
-
+        server.keybinds.deinit();
         server.backend.destroy();
         server.wl_server.destroy();
     }
@@ -548,40 +553,24 @@ pub const Server = struct {
     /// Assumes the modifier used for compositor keybinds is pressed
     /// Returns true if the key was handled
     ///
-    ///
-    /// TODO UPGRADE
-    pub fn handleKeybind(server: *Server, key: xkb.Keysym) bool {
-        switch (@intFromEnum(key)) {
-            // Exit the compositor
-            xkb.Keysym.Escape => server.wl_server.terminate(),
-            xkb.Keysym.r => server.reTile(),
-            // Focus the next toplevel in the stack, pushing the current top to the back
-            xkb.Keysym.F1 => {
-                if (server.toplevels.length() < 2) return true;
-                const toplevel: *Toplevel = @fieldParentPtr("link", server.toplevels.link.prev.?);
-                server.focusView(toplevel, toplevel.xdg_toplevel.base.surface);
-            },
-            xkb.Keysym.k => {
-                server.spawnProgram("kitty") catch |err| {
-                    std.log.err("Failed to spawn: {}", .{err});
-                };
-                return true;
-            },
-            xkb.Keysym.a => {
-                server.spawnProgram("alacritty") catch |err| {
-                    std.log.err("Failed to spawn: {}", .{err});
-                };
-                return true;
-            },
-            xkb.Keysym.b => { // Well ezzel is elment egy délután
-                server.spawnProgram("zen-browser") catch |err| {
-                    std.log.err("Failed to spawn: {}", .{err});
-                };
-                return true;
-            },
-            else => return false,
+    pub fn executeKeybind(server: *Server, modifiers: keys.ModMask, keysym: xkb.Keysym) bool {
+        const bind = keys.Keybind{ .modifiers = modifiers, .keysym = keysym };
+
+        // Check if the user's keystroke exists in our map
+        if (server.keybinds.get(bind)) |registry_id| {
+            // 1. Pull the function out of the Lua Registry and onto the stack
+            _ = lua.lua_rawgeti(server.lua_state, lua.LUA_REGISTRYINDEX, registry_id);
+
+            // 2. Call the function (0 arguments, 0 returns)
+            if (lua.lua_pcallk(server.lua_state, 0, 0, 0, 0, null) != lua.LUA_OK) {
+                const err_msg = lua.lua_tolstring(server.lua_state, -1, null);
+                std.log.err("Keybind execution failed: {s}", .{std.mem.span(err_msg)});
+                lua.lua_pop(server.lua_state, 1); // Cleanup the error from the stack
+            }
+            return true; // We handled it! Don't pass this key to Kitty/Browser.
         }
-        return true;
+
+        return false;
     }
 
     pub fn spawnProgram(server: *Server, cmd: []const u8) !void {
