@@ -7,11 +7,14 @@ const wlr = @import("wlroots");
 const Server = @import("server.zig").Server;
 const lua = @import("server.zig").lua;
 const gpa = std.heap.c_allocator; // Use the C allocator (malloc/free)
-//
-pub fn main() anyerror!void {
-    // Initialize wlroots logging at a debug level
-    wlr.log.init(.debug, null);
 
+pub const std_options = @import("util/logger.zig").options;
+pub fn main() anyerror!void {
+    // 1. ADD THIS LINE: Trigger the Zig logger timer immediately at startup!
+    std.log.info("Starting Impostor WM...", .{});
+
+    // 2. Now wlroots and Zig will share the exact same starting time
+    wlr.log.init(.debug, null);
     // This Server struct will hold all of our compositor's state
     var server: Server = undefined;
     // Initialize all the server components
@@ -39,6 +42,7 @@ pub fn main() anyerror!void {
         try child.spawn(); // Launch the startup command
     }
     // --- EXECUTE LUA SCRIPT ---
+    //TODO
     const filePath = "/home/kissb/zig/impostor/config.lua";
 
     // 1. Load the Lua file
