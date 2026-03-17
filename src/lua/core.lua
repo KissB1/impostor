@@ -20,7 +20,9 @@ wm.setup_chords = function(tree)
     
     local function walk(node, current_state)
         for key_str, value in pairs(node) do
-            if key_str ~= "name" then
+            -- Ignore any keys that are just metadata for the user's config
+            if key_str ~= "name" and key_str ~= "desc" and key_str ~= "leader" then
+                
                 local mods, keysym = parse_key(key_str)
                 
                 if type(value) == "table" then

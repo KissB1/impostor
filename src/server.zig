@@ -585,7 +585,7 @@ pub const Server = struct {
             switch (action) {
                 .next_state => |next_id| {
                     server.current_key_state = next_id; // Move deeper into the tree
-                    //std.log.info("Entered Chord State: {d}", .{next_id});
+                    std.log.info("Entered Chord State: {d}", .{next_id});
                 },
                 .exec_lua => |registry_id| {
                     server.current_key_state = 0; // Reset back to root instantly

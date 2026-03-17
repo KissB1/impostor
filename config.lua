@@ -1,8 +1,3 @@
-wm.log("Initializing Impostor WM...")
-
--- Now everything lives nicely under the 'wm' namespace!
-wm.retile()
-
 wm.log("Loading pristine user config...")
 
 wm.setup_chords({
@@ -11,17 +6,21 @@ wm.setup_chords({
     -- 1. PURE VIM SEQUENCES (Tap, Tap, Tap)
     -- ==========================================
     Alt_L = {
-        name = "Alt Leader",
+        leader = "Alt",
         r = {
+            desc = "Run/Apps",
             b = function() wm.spawn("zen-browser") end,
             c = function() wm.spawn("code") end
         }
     },
     
-    -- If you ever want to use the Spacebar as a leader!
     space = {
-        name = "Space Leader",
-        f = function() wm.log("Space -> f was tapped!") end
+        leader = "Spacebar",
+        f = {
+            desc = "Find",
+            f = function() wm.log("Finding files...") end,
+            w = function() wm.log("Finding words...") end,
+        }
     },
 
     -- ==========================================
@@ -31,4 +30,5 @@ wm.setup_chords({
     ["Super+Escape"] = function() wm.exit() end,
 
 })
-wm.log("Config fully loaded.")
+
+wm.log("Config loaded!")
