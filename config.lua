@@ -1,23 +1,34 @@
 wm.log("Initializing Impostor WM...")
 
 -- Now everything lives nicely under the 'wm' namespace!
-wm.spawn("kitty")
 wm.retile()
 
-wm.bind_key({ "Super", "Shift" }, "Return", function()
-    wm.log("Executing Super+Shift+Return macro!")
-    wm.spawn("kitty")
-end)
+wm.log("Loading pristine user config...")
 
--- Test a simple bind: Super + b opens the browser
-wm.bind_key({ "Super" }, "c", function()
-    wm.log("Opening code...")
-    wm.spawn("code")
-end)
+wm.setup_chords({
+    
+    -- ==========================================
+    -- 1. PURE VIM SEQUENCES (Tap, Tap, Tap)
+    -- ==========================================
+    Alt_L = {
+        name = "Alt Leader",
+        r = {
+            b = function() wm.spawn("zen-browser") end,
+            c = function() wm.spawn("code") end
+        }
+    },
+    
+    -- If you ever want to use the Spacebar as a leader!
+    space = {
+        name = "Space Leader",
+        f = function() wm.log("Space -> f was tapped!") end
+    },
 
-wm.bind_key({ "Super" }, "Escape", function()
-    wm.log("Shutting down compositor...")
-    wm.exit()
-end)
+    -- ==========================================
+    -- 2. TRADITIONAL CHORDS (Hold modifier + Key)
+    -- ==========================================
+    ["Super+Return"] = function() wm.spawn("kitty") end,
+    ["Super+Escape"] = function() wm.exit() end,
 
+})
 wm.log("Config fully loaded.")

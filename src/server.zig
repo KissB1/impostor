@@ -65,7 +65,8 @@ pub const Server = struct {
     unfocused_color: [4]f32,
 
     //keybind hashmap
-    keybinds: std.AutoHashMap(keys.Keybind, i32),
+    keybinds: std.AutoHashMap(keys.Keybind, keys.BindAction),
+    current_key_state: u32 = 0,
 
     // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
     lua_state: *lua.lua_State,
@@ -76,6 +77,16 @@ pub const Server = struct {
         const L = lua.luaL_newstate() orelse return error.LuaInitFailed;
         lua.luaL_openlibs(L);
         lua_api.registerAll(L, server);
+
+        const core_lua = @embedFile("lua/core.lua");
+        // Use loadbuffer since @embedFile gives us a safe slice of memory
+        if (lua.luaL_loadbufferx(L, core_lua.ptr, core_lua.len, "core.lua", null) != lua.LUA_OK or
+            lua.lua_pcallk(L, 0, 0, 0, 0, null) != lua.LUA_OK)
+        {
+            const err_msg = lua.lua_tolstring(L, -1, null);
+            std.log.err("Failed to inject core Lua: {s}", .{std.mem.span(err_msg)});
+            lua.lua_pop(L, 1);
+        }
 
         const wl_server = try wl.Server.create();
         const loop = wl_server.getEventLoop();
@@ -99,7 +110,7 @@ pub const Server = struct {
             .border_width = 4,
             .focused_color = .{ 1.0, 0.0, 0.0, 1.0 }, // red green blue alpha
             .unfocused_color = .{ 0.0, 0.0, 1.0, 1.0 },
-            .keybinds = std.AutoHashMap(keys.Keybind, i32).init(std.heap.c_allocator),
+            .keybinds = std.AutoHashMap(keys.Keybind, keys.BindAction).init(std.heap.c_allocator),
         };
 
         try server.renderer.initServer(wl_server);
@@ -146,7 +157,9 @@ pub const Server = struct {
         server.cursor_button.link.remove();
         server.cursor_axis.link.remove();
         server.cursor_frame.link.remove();
+
         server.keybinds.deinit();
+
         server.backend.destroy();
         server.wl_server.destroy();
     }
@@ -550,24 +563,54 @@ pub const Server = struct {
         server.seat.pointerNotifyFrame();
     }
 
-    /// Assumes the modifier used for compositor keybinds is pressed
-    /// Returns true if the key was handled
-    ///
+    // Returns true if the key was handled
     pub fn executeKeybind(server: *Server, modifiers: keys.ModMask, keysym: xkb.Keysym) bool {
-        const bind = keys.Keybind{ .modifiers = modifiers, .keysym = keysym };
+        var search_mods = modifiers;
 
-        // Check if the user's keystroke exists in our map
-        if (server.keybinds.get(bind)) |registry_id| {
-            // 1. Pull the function out of the Lua Registry and onto the stack
-            _ = lua.lua_rawgeti(server.lua_state, lua.LUA_REGISTRYINDEX, registry_id);
+        // --- THE VIM-LEADER HACK ---
+        // If you physically tap a modifier key (like Alt_L), wlroots instantly activates
+        // the modifier bit. To match our purely sequential config (which has no modifiers),
+        // we strip the bit for the key currently being pressed.
+        switch (@intFromEnum(keysym)) {
+            xkb.Keysym.Alt_L, xkb.Keysym.Alt_R => search_mods.alt = false,
+            xkb.Keysym.Super_L, xkb.Keysym.Super_R => search_mods.super = false,
+            xkb.Keysym.Control_L, xkb.Keysym.Control_R => search_mods.ctrl = false,
+            xkb.Keysym.Shift_L, xkb.Keysym.Shift_R => search_mods.shift = false,
+            else => {},
+        }
 
-            // 2. Call the function (0 arguments, 0 returns)
-            if (lua.lua_pcallk(server.lua_state, 0, 0, 0, 0, null) != lua.LUA_OK) {
-                const err_msg = lua.lua_tolstring(server.lua_state, -1, null);
-                std.log.err("Keybind execution failed: {s}", .{std.mem.span(err_msg)});
-                lua.lua_pop(server.lua_state, 1); // Cleanup the error from the stack
+        const bind = keys.Keybind{ .state = server.current_key_state, .modifiers = search_mods, .keysym = keysym };
+
+        if (server.keybinds.get(bind)) |action| {
+            switch (action) {
+                .next_state => |next_id| {
+                    server.current_key_state = next_id; // Move deeper into the tree
+                    //std.log.info("Entered Chord State: {d}", .{next_id});
+                },
+                .exec_lua => |registry_id| {
+                    server.current_key_state = 0; // Reset back to root instantly
+                    _ = lua.lua_rawgeti(server.lua_state, lua.LUA_REGISTRYINDEX, registry_id);
+                    if (lua.lua_pcallk(server.lua_state, 0, 0, 0, 0, null) != lua.LUA_OK) {
+                        const err_msg = lua.lua_tolstring(server.lua_state, -1, null);
+                        std.log.err("Keybind execution failed: {s}", .{std.mem.span(err_msg)});
+                        lua.lua_pop(server.lua_state, 1);
+                    }
+                },
             }
-            return true; // We handled it! Don't pass this key to Kitty/Browser.
+            return true;
+        }
+
+        // Cancel sequence on invalid keypress
+        const sym_int = @intFromEnum(keysym);
+        if (server.current_key_state != 0 and
+            sym_int != xkb.Keysym.Shift_L and sym_int != xkb.Keysym.Shift_R and
+            sym_int != xkb.Keysym.Control_L and sym_int != xkb.Keysym.Control_R and
+            sym_int != xkb.Keysym.Alt_L and sym_int != xkb.Keysym.Alt_R and
+            sym_int != xkb.Keysym.Super_L and sym_int != xkb.Keysym.Super_R)
+        {
+            std.log.warn("Chord canceled. Invalid sequence.", .{});
+            server.current_key_state = 0;
+            return true;
         }
 
         return false;

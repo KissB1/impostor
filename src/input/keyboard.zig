@@ -79,8 +79,11 @@ pub const Keyboard = struct {
                 .super = mods.logo,
             };
 
+            //std.log.info("KEY PRESSED! Mods -> Super:{}, Alt:{}, Ctrl:{}, Shift:{}", .{ active_mods.super, active_mods.alt, active_mods.ctrl, active_mods.shift });
+
             // Check every symbol this physical key generates
             for (wlr_keyboard.xkb_state.?.keyGetSyms(keycode)) |sym| {
+                //std.log.info(" -> Keysym generated: {d}", .{sym});
                 if (keyboard.server.executeKeybind(active_mods, sym)) {
                     handled = true;
                     break;
