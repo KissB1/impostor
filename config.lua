@@ -7,6 +7,8 @@ wm.setup_chords({
     -- ==========================================
     Alt_L = {
         leader = "Alt",
+        ["1"] = function() wm.set_workspace(1) end,
+        ["2"] = function() wm.set_workspace(2) end,
         r = {
             desc = "Run/Apps",
             b = function() wm.spawn("zen-browser") end,
@@ -28,7 +30,6 @@ wm.setup_chords({
     -- ==========================================
     ["Super+Return"] = function() wm.spawn("kitty") end,
     ["Super+Escape"] = function() wm.exit() end,
-
 })
 
 wm.log("Config loaded!")

@@ -24,6 +24,7 @@ pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
         .{ .name = "log", .func = log_msg },
         .{ .name = "_register_node", .func = register_node },
         .{ .name = "exit", .func = terminate },
+        .{ .name = "set_workspace", .func = set_workspace },
         .{ .name = null, .func = null }, // Sentinel
     };
 
@@ -130,5 +131,20 @@ pub fn terminate(L: ?*lua.lua_State) callconv(.c) i32 {
     const server: *Server = @ptrCast(@alignCast(server_ptr));
 
     server.wl_server.terminate();
+    return 0;
+}
+
+pub fn set_workspace(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    // Get the workspace number from Lua (e.g., 1 to 9)
+    const ws_num: u5 = @intCast(lua.lua_tointegerx(L, 1, null));
+
+    // Convert the number to a bitmask (1 -> 0b001, 2 -> 0b010, 3 -> 0b100)
+    server.current_tags = @as(u32, 1) << (ws_num - 1);
+
+    // Retile the screen to hide old windows and show the new ones!
+    server.reTile();
     return 0;
 }

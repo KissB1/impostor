@@ -68,6 +68,8 @@ pub const Server = struct {
     keybinds: std.AutoHashMap(keys.Keybind, keys.BindAction),
     current_key_state: u32 = 0,
 
+    // Workspaces
+    current_tags: u32 = 1,
     // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
     lua_state: *lua.lua_State,
 
@@ -166,11 +168,8 @@ pub const Server = struct {
 
     pub fn reTile(server: *Server) void {
         var output: ?*wlr.Output = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
-
         if (output == null) {
             if (server.output_layout.outputs.first()) |layout_output| {
-
-                //const layout_output: *wlr.OutputLayout.Output = @fieldParentPtr("link", first_output_link);
                 output = layout_output.output;
             } else {
                 return;
@@ -180,28 +179,44 @@ pub const Server = struct {
         var layout_bound: wlr.Box = undefined;
         _ = server.output_layout.getBox(output, &layout_bound);
         const padding = server.border_width;
-        const toplevel_count: i32 = @intCast(server.toplevels.length());
 
-        if (toplevel_count == 0) {
-            return;
-        }
-
-        const window_height: i32 = @intCast(layout_bound.height - padding * 2);
-        // Calculate available width: total width minus left and right padding
-        // Each window has border_width on left and right, so we need to account for that
-        const available_width: i32 = @intCast(layout_bound.width - padding * 2);
-        // Divide available width equally among all windows
-        // Each window's total space includes its surface width plus borders on both sides
-        const total_space_per_window: i32 = @divTrunc(available_width, toplevel_count);
-        // Surface width is total space minus borders on both sides
-        const window_width: i32 = total_space_per_window - padding * 2;
-
-        var current_x: i32 = layout_bound.x + padding;
-
+        // --- PASS 1: The Filter ---
+        var visible_count: i32 = 0;
         var it = server.toplevels.link.prev;
 
         while (it != &server.toplevels.link) {
             const toplevel: *Toplevel = @fieldParentPtr("link", it.?);
+
+            // Do the window and the monitor share at least 1 bit?
+            const is_visible = (toplevel.tags & server.current_tags) != 0;
+
+            // Tell wlroots to either draw it or hide it (and disable mouse hits!)
+            toplevel.scene_tree.node.setEnabled(is_visible);
+
+            if (is_visible) {
+                visible_count += 1;
+            }
+            it = it.?.prev;
+        }
+
+        if (visible_count == 0) return;
+
+        // --- PASS 2: Calculate Math ---
+        const window_height: i32 = @intCast(layout_bound.height - padding * 2);
+        const available_width: i32 = @intCast(layout_bound.width - padding * 2);
+        const total_space_per_window: i32 = @divTrunc(available_width, visible_count);
+        const window_width: i32 = total_space_per_window - padding * 2;
+
+        var current_x: i32 = layout_bound.x + padding;
+
+        // --- PASS 3: Tile the visible windows ---
+        it = server.toplevels.link.prev;
+        while (it != &server.toplevels.link) {
+            const toplevel: *Toplevel = @fieldParentPtr("link", it.?);
+            it = it.?.prev; // Advance iterator early
+
+            // Skip the hidden ones!
+            if ((toplevel.tags & server.current_tags) == 0) continue;
 
             toplevel.x = current_x;
             toplevel.y = layout_bound.y + padding;
@@ -209,16 +224,12 @@ pub const Server = struct {
 
             _ = toplevel.xdg_toplevel.setSize(window_width, window_height);
 
-            // Update border size immediately with the size we just set
-            // This ensures the border is visible even before the client commits
             const border_width = server.border_width;
             toplevel.border_node.setSize(window_width + border_width * 2, window_height + border_width * 2);
             toplevel.border_node.node.setPosition(0, 0);
             toplevel.surface_scene_tree.node.setPosition(border_width, border_width);
 
-            // Move to next position: current position + total space (includes borders)
             current_x += total_space_per_window;
-            it = it.?.prev;
         }
     }
 
@@ -283,6 +294,7 @@ pub const Server = struct {
             .scene_tree = scene_tree,
             .surface_scene_tree = surface_scene_tree,
             .border_node = border_node,
+            .tags = server.current_tags,
         };
         toplevel.scene_tree.node.data = toplevel;
         xdg_surface.data = toplevel.surface_scene_tree;
@@ -581,7 +593,10 @@ pub const Server = struct {
 
         const bind = keys.Keybind{ .state = server.current_key_state, .modifiers = search_mods, .keysym = keysym };
 
+        std.log.info("[FSM-EXEC] Looking up -> State:{d} | Mods[S:{}, A:{}, C:{}, Sh:{}] | Keysym:{d}", .{ server.current_key_state, search_mods.super, search_mods.alt, search_mods.ctrl, search_mods.shift, keysym });
+
         if (server.keybinds.get(bind)) |action| {
+            std.log.info("[FSM-EXEC] *** MATCH FOUND! ***", .{});
             switch (action) {
                 .next_state => |next_id| {
                     server.current_key_state = next_id; // Move deeper into the tree
@@ -608,7 +623,7 @@ pub const Server = struct {
             sym_int != xkb.Keysym.Alt_L and sym_int != xkb.Keysym.Alt_R and
             sym_int != xkb.Keysym.Super_L and sym_int != xkb.Keysym.Super_R)
         {
-            std.log.warn("Chord canceled. Invalid sequence.", .{});
+            std.log.warn("[FSM-EXEC] MISS! Invalid key pressed in State {d}. Resetting to State 0.", .{server.current_key_state});
             server.current_key_state = 0;
             return true;
         }

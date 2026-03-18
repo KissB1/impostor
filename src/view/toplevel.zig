@@ -21,6 +21,9 @@ pub const Toplevel = struct {
     x: i32 = 0,
     y: i32 = 0,
 
+    // workspace tag
+    tags: u32 = 1,
+
     commit: wl.Listener(*wlr.Surface) = .init(handleCommit),
     map: wl.Listener(void) = .init(handleMap),
     unmap: wl.Listener(void) = .init(handleUnmap),
