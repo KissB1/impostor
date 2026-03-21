@@ -27,6 +27,7 @@ pub fn main() anyerror!void {
     const socket = try server.wl_server.addSocketAuto(&buf);
 
     server.socket_name = socket;
+
     // Check if the user passed a command-line argument to run at startup
     if (std.os.argv.len >= 2) {
         const cmd = std.mem.span(std.os.argv[1]);
@@ -65,7 +66,6 @@ pub fn main() anyerror!void {
     }
     // Start the wlroots backend (e.g., DRM, X11, Wayland)
     try server.backend.start();
-
     // Log the socket name and run the server's event loop.
     // This function will block until the compositor is terminated.
     std.log.info("Running compositor on WAYLAND_DISPLAY={s}", .{socket});

@@ -7,6 +7,8 @@ const lua = @import("../server.zig").lua;
 const Server = @import("../server.zig").Server;
 
 const keys = @import("../input/keys.zig");
+const wlr = @import("wlroots");
+const Toplevel = @import("../view/toplevel.zig").Toplevel;
 
 // --- THE MAGIC REGISTRATION ARRAY ---
 pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
@@ -25,6 +27,8 @@ pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
         .{ .name = "_register_node", .func = register_node },
         .{ .name = "exit", .func = terminate },
         .{ .name = "set_workspace", .func = set_workspace },
+        .{ .name = "focus_direction", .func = focus_direction },
+        .{ .name = "close_window", .func = close_window },
         .{ .name = null, .func = null }, // Sentinel
     };
 
@@ -95,7 +99,13 @@ pub fn register_node(L: ?*lua.lua_State) callconv(.c) i32 {
     }
 
     // Arg 3: The key string
-    const key_str = std.mem.span(lua.lua_tolstring(L, 3, null));
+    var key_str = std.mem.span(lua.lua_tolstring(L, 3, null));
+    // Force generic modifier names to become Left-sided in memory
+    if (std.mem.eql(u8, key_str, "Super")) key_str = "Super_L";
+    if (std.mem.eql(u8, key_str, "Alt")) key_str = "Alt_L";
+    if (std.mem.eql(u8, key_str, "Ctrl")) key_str = "Control_L";
+    if (std.mem.eql(u8, key_str, "Shift")) key_str = "Shift_L";
+
     const keysym = @import("xkbcommon").Keysym.fromName(key_str, .no_flags);
     if (keysym == .NoSymbol) {
         std.log.err("[lua] Invalid FSM key: {s}", .{key_str});
@@ -146,5 +156,98 @@ pub fn set_workspace(L: ?*lua.lua_State) callconv(.c) i32 {
 
     // Retile the screen to hide old windows and show the new ones!
     server.reTile();
+    return 0;
+}
+
+pub fn focus_direction(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    // 1. Get the requested direction ("left", "right", "up", "down")
+    var len: usize = 0;
+    const dir_str = lua.lua_tolstring(L, 1, &len);
+    if (dir_str == null) return 0;
+    const dir = dir_str[0..len];
+
+    // 2. Find the currently focused window (if none, just abort)
+    const focused_surface = server.seat.keyboard_state.focused_surface orelse return 0;
+    const xdg_surface = wlr.XdgSurface.tryFromWlrSurface(focused_surface) orelse return 0;
+
+    var current_toplevel: ?*Toplevel = null;
+    if (xdg_surface.data) |data_ptr| {
+        const scene_tree = @as(*wlr.SceneTree, @ptrCast(@alignCast(data_ptr)));
+        if (scene_tree.node.parent) |container_node| {
+            if (container_node.node.data) |container_data_ptr| {
+                current_toplevel = @as(?*Toplevel, @ptrCast(@alignCast(container_data_ptr)));
+            }
+        }
+    }
+    const current = current_toplevel orelse return 0;
+
+    // Calculate current window's center point
+    const cur_geom = current.xdg_toplevel.base.geometry;
+    const cur_cx = @as(f32, @floatFromInt(current.x)) + @as(f32, @floatFromInt(cur_geom.width)) / 2.0;
+    const cur_cy = @as(f32, @floatFromInt(current.y)) + @as(f32, @floatFromInt(cur_geom.height)) / 2.0;
+
+    // 3. Scan all windows for the closest neighbor
+    var best_match: ?*Toplevel = null;
+    var min_dist_sq: f32 = std.math.floatMax(f32);
+
+    // Iterate through the linked list safely
+    var it = server.toplevels.link.prev;
+    while (it != &server.toplevels.link) {
+        const target: *Toplevel = @fieldParentPtr("link", it.?);
+        it = it.?.prev; // Advance early
+
+        // Skip if it's the window we are already on, or if it's on a hidden workspace
+        if (target == current or (target.tags & server.current_tags) == 0) continue;
+
+        // Calculate target's center point
+        const target_geom = target.xdg_toplevel.base.geometry;
+        const target_cx = @as(f32, @floatFromInt(target.x)) + @as(f32, @floatFromInt(target_geom.width)) / 2.0;
+        const target_cy = @as(f32, @floatFromInt(target.y)) + @as(f32, @floatFromInt(target_geom.height)) / 2.0;
+
+        // The Directional Filter (Cone of Vision)
+        var valid = false;
+        if (std.mem.eql(u8, dir, "left")) valid = target_cx < cur_cx;
+        if (std.mem.eql(u8, dir, "right")) valid = target_cx > cur_cx;
+        if (std.mem.eql(u8, dir, "up")) valid = target_cy < cur_cy;
+        if (std.mem.eql(u8, dir, "down")) valid = target_cy > cur_cy;
+
+        // If it's in the right direction, calculate Euclidean distance squared
+        if (valid) {
+            const dx = target_cx - cur_cx;
+            const dy = target_cy - cur_cy;
+            const dist_sq = (dx * dx) + (dy * dy);
+
+            if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
+                best_match = target;
+            }
+        }
+    }
+
+    // 4. Crown the winner and hand it to wlroots!
+    if (best_match) |winner| {
+        server.focusView(winner, winner.xdg_toplevel.base.surface);
+    }
+
+    return 0;
+}
+pub fn close_window(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    // 1. Ask the Wayland seat what surface currently has the keyboard focus
+    if (server.seat.keyboard_state.focused_surface) |focused_surface| {
+        // 2. Make sure it's actually an XDG Surface (a real window, not a wallpaper/bar)
+        if (wlr.XdgSurface.tryFromWlrSurface(focused_surface)) |xdg_surface| {
+            // 3. Send the polite "Close" request to the application
+            if (xdg_surface.role_data.toplevel) |toplevel| {
+                toplevel.sendClose();
+            }
+        }
+    }
+
     return 0;
 }

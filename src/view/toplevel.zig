@@ -73,18 +73,31 @@ pub const Toplevel = struct {
 
     fn handleDestroy(listener: *wl.Listener(void)) void {
         const toplevel: *Toplevel = @fieldParentPtr("destroy", listener);
-
+        const server = toplevel.server;
         toplevel.commit.link.remove();
         toplevel.map.link.remove();
         toplevel.unmap.link.remove();
         toplevel.destroy.link.remove();
-        toplevel.request_move.link.remove();
-        toplevel.request_resize.link.remove();
+        //toplevel.request_move.link.remove();
+        //toplevel.request_resize.link.remove();
         toplevel.scene_tree.node.destroy();
-        toplevel.link.remove();
+        //toplevel.link.remove();
+
+        // Only remove the link if it is actually attached to a list!
+        if (toplevel.link.prev != null) {
+            toplevel.link.remove();
+        }
+
+        // Do the same for your other listeners just to be safe
+        if (toplevel.request_move.link.prev != null) {
+            toplevel.request_move.link.remove();
+        }
+        if (toplevel.request_resize.link.prev != null) {
+            toplevel.request_resize.link.remove();
+        }
 
         gpa.destroy(toplevel);
-        toplevel.server.reTile();
+        server.reTile();
     }
 
     fn handleRequestMove(

@@ -69,6 +69,7 @@ pub const Server = struct {
     current_key_state: u32 = 0,
 
     // Workspaces
+    // TODO revisit dynamic vs static workspaces, maybe put it in config.
     current_tags: u32 = 1,
     // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
     lua_state: *lua.lua_State,
@@ -116,6 +117,15 @@ pub const Server = struct {
         };
 
         try server.renderer.initServer(wl_server);
+
+        const bg_color = [4]f32{ 0.118, 0.118, 0.180, 1.0 };
+
+        const bg_node = server.scene.tree.createSceneRect(9999, 9999, &bg_color) catch {
+            std.log.err("failed to create background node", .{});
+            return;
+        };
+
+        bg_node.node.lowerToBottom();
 
         _ = try wlr.Compositor.create(server.wl_server, 6, server.renderer);
         _ = try wlr.Subcompositor.create(server.wl_server);
@@ -231,6 +241,27 @@ pub const Server = struct {
 
             current_x += total_space_per_window;
         }
+
+        var found_focus = false;
+        var it_focus = server.toplevels.link.prev;
+
+        while (it_focus != &server.toplevels.link) {
+            const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
+            it_focus = it_focus.?.prev;
+
+            // Is this window visible on our current workspace?
+            if ((target.tags & server.current_tags) != 0) {
+                // Force focus onto it!
+                server.focusView(target, target.xdg_toplevel.base.surface);
+                found_focus = true;
+                break; // Stop looking, we found one!
+            }
+        }
+
+        // If we switched to a completely empty workspace, clear the focus safely
+        if (!found_focus) {
+            server.seat.keyboardNotifyClearFocus();
+        }
     }
 
     fn newOutput(listener: *wl.Listener(*wlr.Output), wlr_output: *wlr.Output) void {
@@ -303,8 +334,8 @@ pub const Server = struct {
         xdg_surface.surface.events.map.add(&toplevel.map);
         xdg_surface.surface.events.unmap.add(&toplevel.unmap);
         xdg_toplevel.events.destroy.add(&toplevel.destroy);
-        //xdg_toplevel.events.request_move.add(&toplevel.request_move);
-        //xdg_toplevel.events.request_resize.add(&toplevel.request_resize);
+        xdg_toplevel.events.request_move.add(&toplevel.request_move);
+        xdg_toplevel.events.request_resize.add(&toplevel.request_resize);
     }
 
     fn newXdgPopup(_: *wl.Listener(*wlr.XdgPopup), xdg_popup: *wlr.XdgPopup) void {
@@ -578,6 +609,7 @@ pub const Server = struct {
     // Returns true if the key was handled
     pub fn executeKeybind(server: *Server, modifiers: keys.ModMask, keysym: xkb.Keysym) bool {
         var search_mods = modifiers;
+        var search_sym_int: u32 = @intFromEnum(keysym);
 
         // --- THE VIM-LEADER HACK ---
         // If you physically tap a modifier key (like Alt_L), wlroots instantly activates
@@ -588,6 +620,17 @@ pub const Server = struct {
             xkb.Keysym.Super_L, xkb.Keysym.Super_R => search_mods.super = false,
             xkb.Keysym.Control_L, xkb.Keysym.Control_R => search_mods.ctrl = false,
             xkb.Keysym.Shift_L, xkb.Keysym.Shift_R => search_mods.shift = false,
+            else => {},
+        }
+        // --- 2. THE NORMALIZATION FUNNEL ---
+        // Funnel all Right-sided physical keys into Left-sided lookups
+        // * NOTE: We are intentionally squashing Right modifiers into Left modifiers here.
+        // * If an app breaks because it needs Right-Shift specifically, look here first.
+        switch (search_sym_int) {
+            xkb.Keysym.Super_R => search_sym_int = xkb.Keysym.Super_L,
+            xkb.Keysym.Alt_R => search_sym_int = xkb.Keysym.Alt_L,
+            xkb.Keysym.Shift_R => search_sym_int = xkb.Keysym.Shift_L,
+            xkb.Keysym.Control_R => search_sym_int = xkb.Keysym.Control_L,
             else => {},
         }
 
