@@ -29,6 +29,10 @@ pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
         .{ .name = "set_workspace", .func = set_workspace },
         .{ .name = "focus_direction", .func = focus_direction },
         .{ .name = "close_window", .func = close_window },
+        .{ .name = "set_inner_gap", .func = set_inner_gap },
+        .{ .name = "set_outer_gap", .func = set_outer_gap },
+        .{ .name = "set_border_width", .func = set_border_width },
+        .{ .name = "set_focused_color", .func = set_focused_color },
         .{ .name = null, .func = null }, // Sentinel
     };
 
@@ -249,5 +253,46 @@ pub fn close_window(L: ?*lua.lua_State) callconv(.c) i32 {
         }
     }
 
+    return 0;
+}
+pub fn set_inner_gap(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    server.inner_gap = @intCast(lua.lua_tointegerx(L, 1, null));
+    server.reTile();
+    return 0;
+}
+
+pub fn set_outer_gap(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    server.outer_gap = @intCast(lua.lua_tointegerx(L, 1, null));
+    server.reTile();
+    return 0;
+}
+
+pub fn set_border_width(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    server.border_width = @intCast(lua.lua_tointegerx(L, 1, null));
+    server.reTile();
+    return 0;
+}
+
+// Helper to grab colors from Lua (expects 4 floats: R, G, B, A)
+pub fn set_focused_color(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    server.focused_color[0] = @floatCast(lua.lua_tonumberx(L, 1, null));
+    server.focused_color[1] = @floatCast(lua.lua_tonumberx(L, 2, null));
+    server.focused_color[2] = @floatCast(lua.lua_tonumberx(L, 3, null));
+    server.focused_color[3] = @floatCast(lua.lua_tonumberx(L, 4, null));
+
+    // You'd ideally iterate over visible windows here and update the active one,
+    // or just let it apply on the next focus change.
     return 0;
 }

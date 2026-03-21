@@ -64,6 +64,10 @@ pub const Server = struct {
     focused_color: [4]f32,
     unfocused_color: [4]f32,
 
+    // Gaps
+    inner_gap: i32 = 10,
+    outer_gap: i32 = 10,
+
     //keybind hashmap
     keybinds: std.AutoHashMap(keys.Keybind, keys.BindAction),
     current_key_state: u32 = 0,
@@ -188,7 +192,6 @@ pub const Server = struct {
 
         var layout_bound: wlr.Box = undefined;
         _ = server.output_layout.getBox(output, &layout_bound);
-        const padding = server.border_width;
 
         // --- PASS 1: The Filter ---
         var visible_count: i32 = 0;
@@ -212,12 +215,26 @@ pub const Server = struct {
         if (visible_count == 0) return;
 
         // --- PASS 2: Calculate Math ---
-        const window_height: i32 = @intCast(layout_bound.height - padding * 2);
-        const available_width: i32 = @intCast(layout_bound.width - padding * 2);
-        const total_space_per_window: i32 = @divTrunc(available_width, visible_count);
-        const window_width: i32 = total_space_per_window - padding * 2;
+        // --- PASS 2: Calculate Math ---
+        const ig = server.inner_gap;
+        const og = server.outer_gap;
+        const b = server.border_width;
 
-        var current_x: i32 = layout_bound.x + padding;
+        // The usable area after subtracting the outer gaps on all sides
+        const usable_width: i32 = @as(i32, @intCast(layout_bound.width)) - (og * 2);
+        const usable_height: i32 = @as(i32, @intCast(layout_bound.height)) - (og * 2);
+
+        // Subtract the inner gaps between the windows (only if there's more than 1 window)
+        const total_inner_gaps = if (visible_count > 1) (visible_count - 1) * ig else 0;
+
+        // Space per window (including borders, excluding gaps)
+        const total_width_per_window = @divTrunc(usable_width - total_inner_gaps, visible_count);
+
+        // Actual window surface size (subtracting borders)
+        const window_width = total_width_per_window - (b * 2);
+        const window_height = usable_height - (b * 2);
+
+        var current_x: i32 = layout_bound.x + og;
 
         // --- PASS 3: Tile the visible windows ---
         it = server.toplevels.link.prev;
@@ -229,17 +246,20 @@ pub const Server = struct {
             if ((toplevel.tags & server.current_tags) == 0) continue;
 
             toplevel.x = current_x;
-            toplevel.y = layout_bound.y + padding;
+            toplevel.y = layout_bound.y + og;
             toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
 
             _ = toplevel.xdg_toplevel.setSize(window_width, window_height);
 
-            const border_width = server.border_width;
-            toplevel.border_node.setSize(window_width + border_width * 2, window_height + border_width * 2);
+            // Set background border node size and position
+            toplevel.border_node.setSize(window_width + (b * 2), window_height + (b * 2));
             toplevel.border_node.node.setPosition(0, 0);
-            toplevel.surface_scene_tree.node.setPosition(border_width, border_width);
 
-            current_x += total_space_per_window;
+            // Offset the actual window surface inside the border
+            toplevel.surface_scene_tree.node.setPosition(b, b);
+
+            // Advance X for the next window: its full allotted width plus the inner gap
+            current_x += total_width_per_window + ig;
         }
 
         var found_focus = false;

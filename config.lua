@@ -39,6 +39,8 @@ wm.setup_chords({
 	-- 2. TRADITIONAL CHORDS (Hold modifier + Key)
 	-- ==========================================
 })
-
+wm.set_inner_gap(10)
+wm.set_outer_gap(25)
+wm.set_focused_color(0.6, 0.2, 0.8, 1.0)
 wm.log("Config loaded!")
 
