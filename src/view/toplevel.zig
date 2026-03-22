@@ -31,6 +31,11 @@ pub const Toplevel = struct {
     request_move: wl.Listener(*wlr.XdgToplevel.event.Move) = .init(handleRequestMove),
     request_resize: wl.Listener(*wlr.XdgToplevel.event.Resize) = .init(handleRequestResize),
 
+    // To be able to have specific workspaces, Like firefox always on workspace 4.
+    // the title can and will change, the app_id is const
+    set_title: wl.Listener(void) = .init(handleSetTitle),
+    set_app_id: wl.Listener(void) = .init(handleSetAppId),
+
     fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
         const toplevel: *Toplevel = @fieldParentPtr("commit", listener);
 
@@ -82,6 +87,9 @@ pub const Toplevel = struct {
         //toplevel.request_resize.link.remove();
         toplevel.scene_tree.node.destroy();
         //toplevel.link.remove();
+
+        toplevel.set_app_id.link.remove();
+        toplevel.set_title.link.remove();
 
         // Only remove the link if it is actually attached to a list!
         if (toplevel.link.prev != null) {
@@ -136,5 +144,18 @@ pub const Toplevel = struct {
         //server.grab_box.y += toplevel.y;
         _ = event;
         _ = listener;
+    }
+    fn handleSetTitle(listener: *wl.Listener(void)) void {
+        const toplevel: *Toplevel = @fieldParentPtr("set_title", listener);
+        const title = toplevel.xdg_toplevel.title orelse "unknown";
+        _ = title; // autofix
+        //std.log.info("Window title set to: {s}\n", .{title});
+    }
+
+    fn handleSetAppId(listener: *wl.Listener(void)) void {
+        const toplevel: *Toplevel = @fieldParentPtr("set_app_id", listener);
+        const app_id = toplevel.xdg_toplevel.app_id orelse "unknown";
+        _ = app_id; // autofix
+        //std.log.info("Window app_id set to: {s}\n", .{app_id});
     }
 };

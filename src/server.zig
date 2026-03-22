@@ -367,6 +367,10 @@ pub const Server = struct {
         xdg_toplevel.events.destroy.add(&toplevel.destroy);
         xdg_toplevel.events.request_move.add(&toplevel.request_move);
         xdg_toplevel.events.request_resize.add(&toplevel.request_resize);
+
+        // for the specific workspaces, Like firefox always on workspace 4.
+        xdg_toplevel.events.set_title.add(&toplevel.set_title);
+        xdg_toplevel.events.set_app_id.add(&toplevel.set_app_id);
     }
 
     fn newXdgPopup(_: *wl.Listener(*wlr.XdgPopup), xdg_popup: *wlr.XdgPopup) void {
