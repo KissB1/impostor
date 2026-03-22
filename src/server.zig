@@ -56,7 +56,8 @@ pub const Server = struct {
     grab_y: f64 = 0,
     grab_box: wlr.Box = undefined,
     resize_edges: wlr.Edges = .{},
-
+    // The drop shadow indicator
+    drop_preview_node: *wlr.SceneRect = undefined,
     socket_name: []const u8 = undefined,
 
     // border
@@ -71,6 +72,9 @@ pub const Server = struct {
     //keybind hashmap
     keybinds: std.AutoHashMap(keys.Keybind, keys.BindAction),
     current_key_state: u32 = 0,
+
+    //mousebind hashmap
+    mousebinds: std.AutoHashMap(keys.MouseBind, keys.MouseAction),
 
     // Workspaces
     // TODO revisit dynamic vs static workspaces, maybe put it in config.
@@ -118,6 +122,7 @@ pub const Server = struct {
             .focused_color = .{ 1.0, 0.0, 0.0, 1.0 }, // red green blue alpha
             .unfocused_color = .{ 0.0, 0.0, 1.0, 1.0 },
             .keybinds = std.AutoHashMap(keys.Keybind, keys.BindAction).init(std.heap.c_allocator),
+            .mousebinds = std.AutoHashMap(keys.MouseBind, keys.MouseAction).init(std.heap.c_allocator),
         };
 
         try server.renderer.initServer(wl_server);
@@ -130,6 +135,11 @@ pub const Server = struct {
         };
 
         bg_node.node.lowerToBottom();
+
+        // Create a bright, semi-transparent preview shadow (R, G, B, Alpha)
+        const preview_color = [4]f32{ 0.2, 0.6, 1.0, 0.4 };
+        server.drop_preview_node = try server.scene.tree.createSceneRect(0, 0, &preview_color);
+        server.drop_preview_node.node.setEnabled(false); // Hidden by default
 
         _ = try wlr.Compositor.create(server.wl_server, 6, server.renderer);
         _ = try wlr.Subcompositor.create(server.wl_server);
@@ -175,6 +185,7 @@ pub const Server = struct {
         server.cursor_frame.link.remove();
 
         server.keybinds.deinit();
+        server.mousebinds.deinit();
 
         server.backend.destroy();
         server.wl_server.destroy();
@@ -533,6 +544,60 @@ pub const Server = struct {
                 toplevel.y = @min(layout_bounds.y + layout_bounds.height - total_height, toplevel.y);
 
                 toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
+
+                // --- UPDATE THE DROP PREVIEW SHADOW ---
+                var hovered_target: ?*Toplevel = null;
+                var it = server.toplevels.link.prev;
+
+                while (it != &server.toplevels.link) : (it = it.?.prev) {
+                    const check_top: *Toplevel = @fieldParentPtr("link", it.?);
+                    if (check_top == toplevel or (check_top.tags & server.current_tags) == 0) continue;
+
+                    const geom = check_top.xdg_toplevel.base.geometry;
+                    const top_x = @as(f64, @floatFromInt(check_top.x));
+                    const top_y = @as(f64, @floatFromInt(check_top.y));
+
+                    const top_w = @as(f64, @floatFromInt(geom.width + (server.border_width * 2)));
+                    const top_h = @as(f64, @floatFromInt(geom.height + (server.border_width * 2)));
+
+                    // === THE X-RAY LOG ===
+                    // This prints every single frame while dragging, showing us exactly
+                    // where the WM thinks the cursor and the target windows are.
+                    std.log.info("X-Ray -> Cursor: {d},{d} | Target Box: X:{d} Y:{d} W:{d} H:{d}", .{ server.cursor.x, server.cursor.y, top_x, top_y, top_w, top_h });
+
+                    if (server.cursor.x >= top_x and server.cursor.x <= top_x + top_w and
+                        server.cursor.y >= top_y and server.cursor.y <= top_y + top_h)
+                    {
+                        hovered_target = check_top;
+                        break;
+                    }
+                }
+
+                if (hovered_target) |target| {
+                    server.drop_preview_node.node.setEnabled(true);
+                    server.drop_preview_node.node.raiseToTop(); // Force to front
+
+                    const t_geom = target.xdg_toplevel.base.geometry;
+                    const t_w = t_geom.width + (server.border_width * 2);
+                    const t_h = t_geom.height + (server.border_width * 2);
+                    const target_mid_x = @as(f64, @floatFromInt(target.x)) + (@as(f64, @floatFromInt(t_w)) / 2.0);
+                    const half_width = @divTrunc(t_w, 2);
+
+                    // === DEBUG LOG ===
+                    // If you don't see this in your terminal when dragging over a window,
+                    // the hit-detection math above is failing!
+                    std.log.info("SHADOW ACTIVE: Target Mid X is {d}, Cursor X is {d}", .{ target_mid_x, server.cursor.x });
+
+                    if (server.cursor.x < target_mid_x) {
+                        server.drop_preview_node.setSize(half_width, t_h);
+                        server.drop_preview_node.node.setPosition(target.x, target.y);
+                    } else {
+                        server.drop_preview_node.setSize(half_width, t_h);
+                        server.drop_preview_node.node.setPosition(target.x + half_width, target.y);
+                    }
+                } else {
+                    server.drop_preview_node.node.setEnabled(false);
+                }
             },
             .resize => {
                 const toplevel = server.grabbed_view.?;
@@ -580,30 +645,111 @@ pub const Server = struct {
         event: *wlr.Pointer.event.Button,
     ) void {
         const server: *Server = @fieldParentPtr("cursor_button", listener);
-        _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
 
-        const is_lmb = (event.button == 272);
+        // 1. Get current keyboard modifiers
+        var active_mods = keys.ModMask{};
+        if (server.seat.getKeyboard()) |wlr_keyboard| {
+            const mods = wlr_keyboard.getModifiers();
+            active_mods = .{
+                .shift = mods.shift,
+                .ctrl = mods.ctrl,
+                .alt = mods.alt,
+                .super = mods.logo,
+            };
+        }
 
+        // 2. Handle Mouse Release (Dropping)
         if (event.state == .released) {
-            if (is_lmb and server.cursor_mode == .move) {
+            if (server.cursor_mode == .move) {
+                server.drop_preview_node.node.setEnabled(false);
+                if (server.grabbed_view) |grabbed| {
+                    // Manual hit-detection: Find the window underneath the cursor
+                    // that is NOT the grabbed window.
+                    var target: ?*Toplevel = null;
+                    var it = server.toplevels.link.prev;
+
+                    // 1. MATCH THE SHADOW'S HITBOX MATH
+                    while (it != &server.toplevels.link) : (it = it.?.prev) {
+                        const check_top: *Toplevel = @fieldParentPtr("link", it.?);
+                        if (check_top == grabbed or (check_top.tags & server.current_tags) == 0) continue;
+
+                        const geom = check_top.xdg_toplevel.base.geometry;
+                        const top_x = @as(f64, @floatFromInt(check_top.x));
+                        const top_y = @as(f64, @floatFromInt(check_top.y));
+                        // MUST include borders, just like processCursorMotion!
+                        const top_w = @as(f64, @floatFromInt(geom.width + (server.border_width * 2)));
+                        const top_h = @as(f64, @floatFromInt(geom.height + (server.border_width * 2)));
+
+                        if (server.cursor.x >= top_x and server.cursor.x <= top_x + top_w and
+                            server.cursor.y >= top_y and server.cursor.y <= top_y + top_h)
+                        {
+                            target = check_top;
+                            break; // Found our drop target!
+                        }
+                    }
+
+                    // 2. MATCH THE SHADOW'S CENTER MATH AND FIX LIST INSERTION
+                    if (target) |t| {
+                        grabbed.link.remove();
+
+                        const t_geom = t.xdg_toplevel.base.geometry;
+                        const t_w = t_geom.width + (server.border_width * 2);
+                        const target_mid_x = @as(f64, @floatFromInt(t.x)) + (@as(f64, @floatFromInt(t_w)) / 2.0);
+
+                        if (server.cursor.x < target_mid_x) {
+                            // Cursor is on the LEFT half.
+                            // Because reTile iterates backwards, inserting AFTER forces it left.
+                            t.link.insert(&grabbed.link);
+                        } else {
+                            // Cursor is on the RIGHT half.
+                            // Inserting BEFORE the target forces it right.
+                            t.link.prev.?.insert(&grabbed.link);
+                        }
+                    }
+                }
+                server.cursor_mode = .passthrough;
+                server.grabbed_view = null;
+                server.reTile();
+            } else if (server.cursor_mode == .resize) {
                 server.cursor_mode = .passthrough;
                 server.grabbed_view = null;
             }
-        } else if (server.viewAt(server.cursor.x, server.cursor.y)) |res| {
-            server.focusView(res.toplevel, res.surface);
-            var alt_pressed = false;
-            if (server.seat.getKeyboard()) |wlr_keyboard| {
-                alt_pressed = wlr_keyboard.getModifiers().alt;
-            }
 
-            if (alt_pressed and is_lmb) {
+            _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
+            return;
+        }
+
+        // 3. Handle Mouse Press (Grabbing)
+        if (server.viewAt(server.cursor.x, server.cursor.y)) |res| {
+            server.focusView(res.toplevel, res.surface);
+
+            // CHECK THE LUA HASHMAP!
+            const bind_to_check = keys.MouseBind{ .modifiers = active_mods, .button = event.button };
+            if (server.mousebinds.get(bind_to_check)) |action| {
                 server.grabbed_view = res.toplevel;
-                server.cursor_mode = .move;
-                server.grab_x = server.cursor.x - @as(f64, @floatFromInt(res.toplevel.x));
-                server.grab_y = server.cursor.y - @as(f64, @floatFromInt(res.toplevel.y));
+
+                switch (action) {
+                    .move => {
+                        server.cursor_mode = .move;
+                        server.grab_x = server.cursor.x - @as(f64, @floatFromInt(res.toplevel.x));
+                        server.grab_y = server.cursor.y - @as(f64, @floatFromInt(res.toplevel.y));
+                    },
+                    .resize => {
+                        server.cursor_mode = .resize;
+                        // Basic resize logic (you can refine edges later)
+                        const box = res.toplevel.xdg_toplevel.base.geometry;
+                        server.grab_x = server.cursor.x - @as(f64, @floatFromInt(res.toplevel.x + box.x + box.width));
+                        server.grab_y = server.cursor.y - @as(f64, @floatFromInt(res.toplevel.y + box.y + box.height));
+                    },
+                }
+
+                // Swallow the click! The WM handled it.
                 return;
             }
         }
+
+        // 4. Pass regular clicks to the app
+        _ = server.seat.pointerNotifyButton(event.time_msec, event.button, event.state);
     }
 
     fn cursorAxis(
@@ -656,14 +802,14 @@ pub const Server = struct {
 
         const bind = keys.Keybind{ .state = server.current_key_state, .modifiers = search_mods, .keysym = keysym };
 
-        std.log.info("[FSM-EXEC] Looking up -> State:{d} | Mods[S:{}, A:{}, C:{}, Sh:{}] | Keysym:{d}", .{ server.current_key_state, search_mods.super, search_mods.alt, search_mods.ctrl, search_mods.shift, keysym });
+        //std.log.info("[FSM-EXEC] Looking up -> State:{d} | Mods[S:{}, A:{}, C:{}, Sh:{}] | Keysym:{d}", .{ server.current_key_state, search_mods.super, search_mods.alt, search_mods.ctrl, search_mods.shift, keysym });
 
         if (server.keybinds.get(bind)) |action| {
-            std.log.info("[FSM-EXEC] *** MATCH FOUND! ***", .{});
+            //std.log.info("[FSM-EXEC] *** MATCH FOUND! ***", .{});
             switch (action) {
                 .next_state => |next_id| {
                     server.current_key_state = next_id; // Move deeper into the tree
-                    std.log.info("Entered Chord State: {d}", .{next_id});
+                    //std.log.info("Entered Chord State: {d}", .{next_id});
                 },
                 .exec_lua => |registry_id| {
                     server.current_key_state = 0; // Reset back to root instantly
@@ -686,7 +832,7 @@ pub const Server = struct {
             sym_int != xkb.Keysym.Alt_L and sym_int != xkb.Keysym.Alt_R and
             sym_int != xkb.Keysym.Super_L and sym_int != xkb.Keysym.Super_R)
         {
-            std.log.warn("[FSM-EXEC] MISS! Invalid key pressed in State {d}. Resetting to State 0.", .{server.current_key_state});
+            //std.log.warn("[FSM-EXEC] MISS! Invalid key pressed in State {d}. Resetting to State 0.", .{server.current_key_state});
             server.current_key_state = 0;
             return true;
         }

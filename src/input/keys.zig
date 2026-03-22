@@ -19,3 +19,13 @@ pub const BindAction = union(enum) {
     next_state: u32,
     exec_lua: i32,
 };
+
+pub const MouseAction = enum {
+    move,
+    resize,
+};
+
+pub const MouseBind = struct {
+    modifiers: ModMask,
+    button: u32,
+};

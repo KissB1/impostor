@@ -33,6 +33,7 @@ pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
         .{ .name = "set_outer_gap", .func = set_outer_gap },
         .{ .name = "set_border_width", .func = set_border_width },
         .{ .name = "set_focused_color", .func = set_focused_color },
+        .{ .name = "bind_mouse", .func = bind_mouse },
         .{ .name = null, .func = null }, // Sentinel
     };
 
@@ -294,5 +295,43 @@ pub fn set_focused_color(L: ?*lua.lua_State) callconv(.c) i32 {
 
     // You'd ideally iterate over visible windows here and update the active one,
     // or just let it apply on the next focus change.
+    return 0;
+}
+// lua/methods.zig
+pub fn bind_mouse(L: ?*lua.lua_State) callconv(.c) i32 {
+    const server_ptr = lua.lua_touserdata(L, lua.lua_upvalueindex(1));
+    const server: *Server = @ptrCast(@alignCast(server_ptr));
+
+    // Arg 1: Modifiers Table
+    var mods = keys.ModMask{};
+    lua.lua_pushnil(L);
+    while (lua.lua_next(L, 1) != 0) {
+        if (lua.lua_type(L, -1) == lua.LUA_TSTRING) {
+            const mod_slice = std.mem.span(lua.lua_tolstring(L, -1, null));
+            if (std.mem.eql(u8, mod_slice, "Super")) mods.super = true else if (std.mem.eql(u8, mod_slice, "Shift")) mods.shift = true else if (std.mem.eql(u8, mod_slice, "Ctrl")) mods.ctrl = true else if (std.mem.eql(u8, mod_slice, "Alt")) mods.alt = true;
+        }
+        lua.lua_pop(L, 1);
+    }
+
+    // Arg 2: Mouse Button (272 = Left, 273 = Right, 274 = Middle)
+    const button: u32 = @intCast(lua.lua_tointegerx(L, 2, null));
+
+    // Arg 3: Action String ("move" or "resize")
+    const action_str = std.mem.span(lua.lua_tolstring(L, 3, null));
+    var action: keys.MouseAction = .move;
+
+    if (std.mem.eql(u8, action_str, "resize")) {
+        action = .resize;
+    } else if (!std.mem.eql(u8, action_str, "move")) {
+        std.log.err("[lua] Invalid mouse action: {s}", .{action_str});
+        return 0;
+    }
+
+    // Save to the map!
+    const bind = keys.MouseBind{ .modifiers = mods, .button = button };
+    server.mousebinds.put(bind, action) catch |err| {
+        std.log.err("Failed to save mouse bind: {}", .{err});
+    };
+
     return 0;
 }

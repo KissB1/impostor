@@ -39,6 +39,11 @@ wm.setup_chords({
 	-- 2. TRADITIONAL CHORDS (Hold modifier + Key)
 	-- ==========================================
 })
+-- Bind Ctrl + Left Click (272) to Move
+wm.bind_mouse({"Ctrl"}, 272, "move")
+
+-- Bind Ctrl + Right Click (273) to Resize
+wm.bind_mouse({"Ctrl"}, 273, "resize")
 wm.set_inner_gap(10)
 wm.set_outer_gap(25)
 wm.set_focused_color(0.6, 0.2, 0.8, 1.0)
