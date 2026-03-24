@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
     scanner.addSystemProtocol("stable/tablet/tablet-v2.xml");
 
+    scanner.addCustomProtocol(b.path("protocol/wlr-layer-shell-unstable-v1.xml"));
+
     scanner.generate("wl_compositor", 4);
     scanner.generate("wl_subcompositor", 1);
     scanner.generate("wl_shm", 1);
@@ -18,6 +20,7 @@ pub fn build(b: *std.Build) void {
     scanner.generate("wl_data_device_manager", 3);
     scanner.generate("xdg_wm_base", 2);
     scanner.generate("zwp_tablet_manager_v2", 1);
+    scanner.generate("zwlr_layer_shell_v1", 4);
 
     const wayland = b.createModule(.{ .root_source_file = scanner.result });
     const xkbcommon = b.dependency("xkbcommon", .{}).module("xkbcommon");

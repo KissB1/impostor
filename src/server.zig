@@ -56,6 +56,10 @@ pub const Server = struct {
     grab_y: f64 = 0,
     grab_box: wlr.Box = undefined,
     resize_edges: wlr.Edges = .{},
+
+    layer_shell: ?*wlr.LayerShellV1,
+    layer_shell_new_surface: wl.Listener(*wlr.LayerSurfaceV1) = .init(handleLayerShellNewSurface),
+
     // The drop shadow indicator
     drop_preview_node: *wlr.SceneRect = undefined,
     socket_name: []const u8 = undefined,
@@ -114,7 +118,8 @@ pub const Server = struct {
             .scene = scene,
             .output_layout = output_layout,
             .scene_output_layout = try scene.attachOutputLayout(output_layout),
-            .xdg_shell = try wlr.XdgShell.create(wl_server, 2),
+            .xdg_shell = try wlr.XdgShell.create(wl_server, 3),
+            .layer_shell = try wlr.LayerShellV1.create(wl_server, 4),
             .seat = try wlr.Seat.create(wl_server, "default"),
             .cursor = try wlr.Cursor.create(),
             .cursor_mgr = try wlr.XcursorManager.create(null, 24),
@@ -149,6 +154,14 @@ pub const Server = struct {
 
         server.xdg_shell.events.new_toplevel.add(&server.new_xdg_toplevel);
         server.xdg_shell.events.new_popup.add(&server.new_xdg_popup);
+        server.layer_shell.?.events.new_surface.add(&server.layer_shell_new_surface);
+
+        // 1. Gives Waybar your monitor names and geometry
+        _ = try wlr.XdgOutputManagerV1.create(server.wl_server, server.output_layout);
+
+        // 2. Allows Kitty to politely ask for focus
+        _ = try wlr.XdgActivationV1.create(server.wl_server);
+
         server.toplevels.init();
 
         server.backend.events.new_input.add(&server.new_input);
@@ -828,6 +841,18 @@ pub const Server = struct {
         }
 
         return false;
+    }
+
+    fn handleLayerShellNewSurface(listener: *wl.Listener(*wlr.LayerSurfaceV1), layer_surface: *wlr.LayerSurfaceV1) void {
+        const server: *Server = @fieldParentPtr("layer_shell_new_surface", listener);
+        _ = server; // autofix
+
+        // Waybar/Fuzzel/Swaybg just sent us their surface!
+        // The 'layer_surface' variable now holds the actual Waybar window data.
+        std.log.info("===========================================", .{});
+        std.log.info("A Layer Shell App is knocking on the door!", .{});
+        std.log.info("App namespace: {s}", .{layer_surface.namespace});
+        std.log.info("===========================================", .{});
     }
 
     pub fn spawnProgram(server: *Server, cmd: []const u8) !void {
