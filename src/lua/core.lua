@@ -38,3 +38,11 @@ wm.setup_chords = function(tree)
     end
     walk(tree, 0)
 end
+
+wm.on_manage = function(client)
+    -- Prove that Lua can read the Wayland string!
+    wm.log("----- LUA CAUGHT A WINDOW! -----")
+    wm.log("App ID: " .. client.app_id)
+    wm.log("Title: " .. client.title)
+    wm.log("--------------------------------")
+end

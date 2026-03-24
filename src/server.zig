@@ -204,19 +204,14 @@ pub const Server = struct {
         var layout_bound: wlr.Box = undefined;
         _ = server.output_layout.getBox(output, &layout_bound);
 
-        // --- PASS 1: The Filter ---
+        // --- PASS 1: The Filter (Keep this!) ---
         var visible_count: i32 = 0;
         var it = server.toplevels.link.prev;
 
         while (it != &server.toplevels.link) {
             const toplevel: *Toplevel = @fieldParentPtr("link", it.?);
-
-            // Do the window and the monitor share at least 1 bit?
             const is_visible = (toplevel.tags & server.current_tags) != 0;
-
-            // Tell wlroots to either draw it or hide it (and disable mouse hits!)
             toplevel.scene_tree.node.setEnabled(is_visible);
-
             if (is_visible) {
                 visible_count += 1;
             }
@@ -225,71 +220,62 @@ pub const Server = struct {
 
         if (visible_count == 0) return;
 
-        // --- PASS 2: Calculate Math ---
-        // --- PASS 2: Calculate Math ---
-        const ig = server.inner_gap;
-        const og = server.outer_gap;
-        const b = server.border_width;
+        // --- NEW PASS 2: Let Lua do the Math! ---
+        const L = server.lua_state;
 
-        // The usable area after subtracting the outer gaps on all sides
-        const usable_width: i32 = @as(i32, @intCast(layout_bound.width)) - (og * 2);
-        const usable_height: i32 = @as(i32, @intCast(layout_bound.height)) - (og * 2);
+        _ = lua.lua_getglobal(L, "wm"); // Push 'wm'
+        _ = lua.lua_getfield(L, -1, "on_tile"); // Push 'wm.on_tile'
 
-        // Subtract the inner gaps between the windows (only if there's more than 1 window)
-        const total_inner_gaps = if (visible_count > 1) (visible_count - 1) * ig else 0;
+        if (lua.lua_isfunction(L, -1)) {
+            // 1. Create the array table for Lua
+            lua.lua_newtable(L);
+            var array_index: i32 = 1;
 
-        // Space per window (including borders, excluding gaps)
-        const total_width_per_window = @divTrunc(usable_width - total_inner_gaps, visible_count);
+            // 2. Loop backwards through the list to get Left-to-Right visual order
+            var it_lua = server.toplevels.link.prev;
+            while (it_lua != &server.toplevels.link) : (it_lua = it_lua.?.prev) {
+                const toplevel: *Toplevel = @fieldParentPtr("link", it_lua.?);
 
-        // Actual window surface size (subtracting borders)
-        const window_width = total_width_per_window - (b * 2);
-        const window_height = usable_height - (b * 2);
+                // Only give Lua the windows that belong on this workspace
+                if ((toplevel.tags & server.current_tags) != 0) {
+                    lua_api.push_client(L, toplevel);
+                    lua.lua_rawseti(L, -2, array_index); // table[array_index] = client
+                    array_index += 1;
+                }
+            }
 
-        var current_x: i32 = layout_bound.x + og;
+            // 3. Push the monitor width and height
+            lua.lua_pushinteger(L, layout_bound.width);
+            lua.lua_pushinteger(L, layout_bound.height);
 
-        // --- PASS 3: Tile the visible windows ---
-        it = server.toplevels.link.prev;
-        while (it != &server.toplevels.link) {
-            const toplevel: *Toplevel = @fieldParentPtr("link", it.?);
-            it = it.?.prev; // Advance iterator early
+            // Push the active tag too
+            lua.lua_pushinteger(L, server.current_tags);
 
-            // Skip the hidden ones!
-            if ((toplevel.tags & server.current_tags) == 0) continue;
-
-            toplevel.x = current_x;
-            toplevel.y = layout_bound.y + og;
-            toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
-
-            _ = toplevel.xdg_toplevel.setSize(window_width, window_height);
-
-            // Set background border node size and position
-            toplevel.border_node.setSize(window_width + (b * 2), window_height + (b * 2));
-            toplevel.border_node.node.setPosition(0, 0);
-
-            // Offset the actual window surface inside the border
-            toplevel.surface_scene_tree.node.setPosition(b, b);
-
-            // Advance X for the next window: its full allotted width plus the inner gap
-            current_x += total_width_per_window + ig;
+            // 4. Call wm.on_tile(clients, width, height) -> 3 arguments, 0 returns
+            if (lua.lua_pcallk(L, 4, 0, 0, 0, null) != lua.LUA_OK) {
+                const err_msg = lua.lua_tolstring(L, -1, null);
+                std.log.err("Lua on_tile Error: {s}", .{std.mem.span(err_msg)});
+                lua.lua_pop(L, 1);
+            }
+        } else {
+            lua.lua_pop(L, 1); // Pop the nil if function wasn't found
         }
+        lua.lua_pop(L, 1); // Pop the 'wm' table
 
+        // --- PASS 3: Focus Management (Keep this!) ---
         var found_focus = false;
         var it_focus = server.toplevels.link.prev;
-
         while (it_focus != &server.toplevels.link) {
             const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
             it_focus = it_focus.?.prev;
 
-            // Is this window visible on our current workspace?
             if ((target.tags & server.current_tags) != 0) {
-                // Force focus onto it!
                 server.focusView(target, target.xdg_toplevel.base.surface);
                 found_focus = true;
-                break; // Stop looking, we found one!
+                break;
             }
         }
 
-        // If we switched to a completely empty workspace, clear the focus safely
         if (!found_focus) {
             server.seat.keyboardNotifyClearFocus();
         }

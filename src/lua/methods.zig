@@ -41,6 +41,11 @@ pub fn registerAll(L: ?*lua.lua_State, server: *Server) void {
     // we pushed, and attaches it to every single function in the table.
     lua.luaL_setfuncs(L, &funcs, 1);
 
+    _ = lua.luaL_newmetatable(L, "Client");
+    lua.lua_pushcfunction(L, client_index);
+    lua.lua_setfield(L, -2, "__index");
+    lua.lua_pop(L, 1); // Pop the metatable off the stack
+
     // Take the table we just filled and assign it to the global variable "wm"
     lua.lua_setglobal(L, "wm");
 }
@@ -334,4 +339,78 @@ pub fn bind_mouse(L: ?*lua.lua_State) callconv(.c) i32 {
     };
 
     return 0;
+}
+
+pub fn client_index(L: ?*lua.lua_State) callconv(.c) i32 {
+    // 1. Open the lockbox (get the Toplevel pointer from Userdata)
+    const userdata = lua.lua_touserdata(L, 1);
+    const ptr: **Toplevel = @ptrCast(@alignCast(userdata));
+    const toplevel = ptr.*;
+
+    // 2. What property is Lua asking for?
+    var len: usize = 0;
+    const key_c_str = lua.lua_tolstring(L, 2, &len);
+    if (key_c_str == null) return 0;
+    const key = key_c_str[0..len];
+
+    // 3. Hand the correct data back to Lua!
+    if (std.mem.eql(u8, key, "app_id")) {
+        if (toplevel.xdg_toplevel.app_id) |app_id| {
+            _ = lua.lua_pushstring(L, app_id);
+        } else {
+            _ = lua.lua_pushstring(L, "unknown");
+        }
+        return 1; // We pushed 1 thing to the stack
+    } else if (std.mem.eql(u8, key, "title")) {
+        if (toplevel.xdg_toplevel.title) |title| {
+            _ = lua.lua_pushstring(L, title);
+        } else {
+            _ = lua.lua_pushstring(L, "unknown");
+        }
+        return 1;
+    } else if (std.mem.eql(u8, key, "set_geometry")) {
+        // If they asked for a function, give them the C-function
+        lua.lua_pushcfunction(L, client_set_geometry);
+        return 1;
+    }
+
+    return 0; // Property not found
+}
+pub fn client_set_geometry(L: ?*lua.lua_State) callconv(.c) i32 {
+    // 1. Get the Toplevel (Arg 1, because Lua calls it with client:set_geometry())
+    const userdata = lua.lua_touserdata(L, 1);
+    const ptr: **Toplevel = @ptrCast(@alignCast(userdata));
+    const toplevel = ptr.*;
+
+    // 2. Get the X, Y, Width, and Height from Lua
+    const x: i32 = @intCast(lua.lua_tointegerx(L, 2, null));
+    const y: i32 = @intCast(lua.lua_tointegerx(L, 3, null));
+    const w: i32 = @intCast(lua.lua_tointegerx(L, 4, null));
+    const h: i32 = @intCast(lua.lua_tointegerx(L, 5, null));
+
+    // 3. Apply the math to the Wayland window
+    toplevel.x = x;
+    toplevel.y = y;
+    toplevel.scene_tree.node.setPosition(x, y);
+    _ = toplevel.xdg_toplevel.setSize(w, h);
+
+    // 4. Update the border node to match the new size
+    const b = toplevel.server.border_width;
+    toplevel.border_node.setSize(w + (b * 2), h + (b * 2));
+    toplevel.border_node.node.setPosition(0, 0);
+    toplevel.surface_scene_tree.node.setPosition(b, b);
+
+    return 0;
+}
+
+// We will call this from server.zig whenever we want to pass a window to Lua
+pub fn push_client(L: ?*lua.lua_State, toplevel: *Toplevel) void {
+    // 1. Allocate memory inside Lua to hold our Zig pointer
+    const userdata = lua.lua_newuserdata(L, @sizeOf(*Toplevel));
+    const ptr: **Toplevel = @ptrCast(@alignCast(userdata));
+    ptr.* = toplevel;
+
+    // 2. Tape the "Client" instruction manual to the box
+    _ = lua.luaL_getmetatable(L, "Client");
+    _ = lua.lua_setmetatable(L, -2);
 }

@@ -7,6 +7,9 @@ const wl = @import("wayland").server.wl;
 const wlr = @import("wlroots");
 const xkb = @import("xkbcommon");
 
+const lua = @import("../server.zig").lua;
+const lua_api = @import("../lua/methods.zig");
+
 const gpa = std.heap.c_allocator;
 
 pub const Toplevel = struct {
@@ -65,6 +68,28 @@ pub const Toplevel = struct {
         //toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
         toplevel.server.toplevels.prepend(toplevel);
         toplevel.server.focusView(toplevel, toplevel.xdg_toplevel.base.surface);
+
+        // --- CALL LUA: wm.on_manage(client) ---
+        const L = toplevel.server.lua_state;
+
+        _ = lua.lua_getglobal(L, "wm"); // Push 'wm' table
+        _ = lua.lua_getfield(L, -1, "on_manage"); // Push 'wm.on_manage' function
+
+        if (lua.lua_isfunction(L, -1)) {
+            // It's a valid function! Push the lockbox to the stack.
+            lua_api.push_client(L, toplevel);
+
+            // Execute it with 1 argument, 0 return values
+            if (lua.lua_pcallk(L, 1, 0, 0, 0, null) != lua.LUA_OK) {
+                const err_msg = lua.lua_tolstring(L, -1, null);
+                std.log.err("Lua on_manage Error: {s}", .{std.mem.span(err_msg)});
+                lua.lua_pop(L, 1); // Pop error
+            }
+        } else {
+            lua.lua_pop(L, 1); // Pop the nil if the function wasn't found
+        }
+        lua.lua_pop(L, 1); // Pop the 'wm' table
+        // --------------------------------------
 
         toplevel.server.reTile();
     }
