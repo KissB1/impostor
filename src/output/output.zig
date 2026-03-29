@@ -17,6 +17,18 @@ pub const Output = struct {
     request_state: wl.Listener(*wlr.Output.event.RequestState) = .init(handleRequestState),
     destroy: wl.Listener(*wlr.Output) = .init(handleDestroy),
 
+    // To have multiple outputs, we need to have the current_tags for each output
+    // this is an archituctal decision, without this, if we change workspaces on one output, the tags will change on all outputs
+    // whit lua, we can have a method to change all the tags on all outputs
+
+    current_tags: u32 = 1,
+    usable_area: wlr.Box = .{
+        .x = 0,
+        .y = 0,
+        .width = 0,
+        .height = 0,
+    },
+
     // The wlr.Output should be destroyed by the caller on failure to trigger cleanup.
     pub fn create(server: *Server, wlr_output: *wlr.Output) !void {
         const output = try gpa.create(Output);
@@ -25,6 +37,11 @@ pub const Output = struct {
             .server = server,
             .wlr_output = wlr_output,
         };
+
+        // --- THE MAGIC LIFELINE ---
+        // This tells wlroots: "Hold onto my custom struct so I can read my tags later!"
+        wlr_output.data = @ptrCast(output);
+
         wlr_output.events.frame.add(&output.frame);
         wlr_output.events.request_state.add(&output.request_state);
         wlr_output.events.destroy.add(&output.destroy);

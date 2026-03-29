@@ -57,8 +57,12 @@ pub const Server = struct {
     grab_box: wlr.Box = undefined,
     resize_edges: wlr.Edges = .{},
 
+    // layer shell for waybar and apps that needs to know where to go and stay,
     layer_shell: ?*wlr.LayerShellV1,
     layer_shell_new_surface: wl.Listener(*wlr.LayerSurfaceV1) = .init(handleLayerShellNewSurface),
+
+    layer_surfaces: wl.list.Head(LayerSurface, .link) = undefined,
+    // usable area moved to output.zig since it is per output, not global
 
     // The drop shadow indicator
     drop_preview_node: *wlr.SceneRect = undefined,
@@ -80,9 +84,8 @@ pub const Server = struct {
     //mousebind hashmap
     mousebinds: std.AutoHashMap(keys.MouseBind, keys.MouseAction),
 
-    // Workspaces
-    // TODO revisit dynamic vs static workspaces, maybe put it in config.
-    current_tags: u32 = 1,
+    // Workspaces moved to output.zig
+
     // lua state, this is the main lua pointer, akin to the file pointer when opening a file.
     lua_state: *lua.lua_State,
 
@@ -163,6 +166,7 @@ pub const Server = struct {
         _ = try wlr.XdgActivationV1.create(server.wl_server);
 
         server.toplevels.init();
+        server.layer_surfaces.init();
 
         server.backend.events.new_input.add(&server.new_input);
         server.seat.events.request_set_cursor.add(&server.request_set_cursor);
@@ -205,87 +209,98 @@ pub const Server = struct {
     }
 
     pub fn reTile(server: *Server) void {
-        var output: ?*wlr.Output = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
-        if (output == null) {
-            if (server.output_layout.outputs.first()) |layout_output| {
-                output = layout_output.output;
-            } else {
-                return;
-            }
-        }
+        // ==========================================================
+        // PASS 1 & 2: LOOP THROUGH EVERY MONITOR INDEPENDENTLY
+        // ==========================================================
+        var it_out = server.output_layout.outputs.link.next;
+        while (it_out != &server.output_layout.outputs.link) : (it_out = it_out.?.next) {
+            const layout_output: *wlr.OutputLayout.Output = @fieldParentPtr("link", it_out.?);
+            const wlr_output = layout_output.output;
 
-        var layout_bound: wlr.Box = undefined;
-        _ = server.output_layout.getBox(output, &layout_bound);
+            // Get the specific data for THIS monitor
+            const out_struct = @as(*Output, @ptrCast(@alignCast(wlr_output.data.?)));
+            const current_tags = out_struct.current_tags;
 
-        // --- PASS 1: The Filter (Keep this!) ---
-        var visible_count: i32 = 0;
-        var it = server.toplevels.link.prev;
+            // --- PASS 1: The Filter ---
+            var it_top = server.toplevels.link.prev;
+            while (it_top != &server.toplevels.link) : (it_top = it_top.?.prev) {
+                const toplevel: *Toplevel = @fieldParentPtr("link", it_top.?);
 
-        while (it != &server.toplevels.link) {
-            const toplevel: *Toplevel = @fieldParentPtr("link", it.?);
-            const is_visible = (toplevel.tags & server.current_tags) != 0;
-            toplevel.scene_tree.node.setEnabled(is_visible);
-            if (is_visible) {
-                visible_count += 1;
-            }
-            it = it.?.prev;
-        }
-
-        if (visible_count == 0) return;
-
-        // --- NEW PASS 2: Let Lua do the Math! ---
-        const L = server.lua_state;
-
-        _ = lua.lua_getglobal(L, "wm"); // Push 'wm'
-        _ = lua.lua_getfield(L, -1, "on_tile"); // Push 'wm.on_tile'
-
-        if (lua.lua_isfunction(L, -1)) {
-            // 1. Create the array table for Lua
-            lua.lua_newtable(L);
-            var array_index: i32 = 1;
-
-            // 2. Loop backwards through the list to get Left-to-Right visual order
-            var it_lua = server.toplevels.link.prev;
-            while (it_lua != &server.toplevels.link) : (it_lua = it_lua.?.prev) {
-                const toplevel: *Toplevel = @fieldParentPtr("link", it_lua.?);
-
-                // Only give Lua the windows that belong on this workspace
-                if ((toplevel.tags & server.current_tags) != 0) {
-                    lua_api.push_client(L, toplevel);
-                    lua.lua_rawseti(L, -2, array_index); // table[array_index] = client
-                    array_index += 1;
+                // ONLY touch windows that belong to this specific monitor!
+                if (toplevel.output == wlr_output) {
+                    const is_visible = (toplevel.tags & current_tags) != 0;
+                    toplevel.scene_tree.node.setEnabled(is_visible);
                 }
             }
 
-            // 3. Push the monitor width and height
-            lua.lua_pushinteger(L, layout_bound.width);
-            lua.lua_pushinteger(L, layout_bound.height);
+            // --- PASS 2: Let Lua do the Math ---
+            const L = server.lua_state;
+            _ = lua.lua_getglobal(L, "wm");
+            _ = lua.lua_getfield(L, -1, "on_tile");
 
-            // Push the active tag too
-            lua.lua_pushinteger(L, server.current_tags);
+            if (lua.lua_isfunction(L, -1)) {
+                lua.lua_newtable(L);
+                var array_index: i32 = 1;
 
-            // 4. Call wm.on_tile(clients, width, height) -> 3 arguments, 0 returns
-            if (lua.lua_pcallk(L, 4, 0, 0, 0, null) != lua.LUA_OK) {
-                const err_msg = lua.lua_tolstring(L, -1, null);
-                std.log.err("Lua on_tile Error: {s}", .{std.mem.span(err_msg)});
+                var it_lua = server.toplevels.link.prev;
+                while (it_lua != &server.toplevels.link) : (it_lua = it_lua.?.prev) {
+                    const toplevel: *Toplevel = @fieldParentPtr("link", it_lua.?);
+
+                    // ONLY give Lua the windows for this monitor's active tag
+                    if (toplevel.output == wlr_output and (toplevel.tags & current_tags) != 0) {
+                        lua_api.push_client(L, toplevel);
+                        lua.lua_rawseti(L, -2, array_index);
+                        array_index += 1;
+                    }
+                }
+
+                // Grab the safe zone FOR THIS MONITOR
+                var bounds = out_struct.usable_area;
+                if (bounds.width == 0) {
+                    _ = server.output_layout.getBox(wlr_output, &bounds);
+                }
+
+                lua.lua_pushinteger(L, bounds.x);
+                lua.lua_pushinteger(L, bounds.y);
+                lua.lua_pushinteger(L, bounds.width);
+                lua.lua_pushinteger(L, bounds.height);
+                lua.lua_pushinteger(L, current_tags);
+
+                if (lua.lua_pcallk(L, 6, 0, 0, 0, null) != lua.LUA_OK) {
+                    const err_msg = lua.lua_tolstring(L, -1, null);
+                    std.log.err("Lua on_tile Error: {s}", .{std.mem.span(err_msg)});
+                    lua.lua_pop(L, 1);
+                }
+            } else {
                 lua.lua_pop(L, 1);
             }
-        } else {
-            lua.lua_pop(L, 1); // Pop the nil if function wasn't found
+            lua.lua_pop(L, 1); // Pop 'wm' table
         }
-        lua.lua_pop(L, 1); // Pop the 'wm' table
 
-        // --- PASS 3: Focus Management (Keep this!) ---
+        // ==========================================================
+        // PASS 3: FOCUS MANAGEMENT (Which monitor is the mouse on?)
+        // ==========================================================
+        var cursor_out = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+        if (cursor_out == null) {
+            if (server.output_layout.outputs.first()) |lo| {
+                cursor_out = lo.output;
+            }
+        }
+
         var found_focus = false;
-        var it_focus = server.toplevels.link.prev;
-        while (it_focus != &server.toplevels.link) {
-            const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
-            it_focus = it_focus.?.prev;
+        if (cursor_out) |c_out| {
+            const cursor_out_struct = @as(*Output, @ptrCast(@alignCast(c_out.data.?)));
 
-            if ((target.tags & server.current_tags) != 0) {
-                server.focusView(target, target.xdg_toplevel.base.surface);
-                found_focus = true;
-                break;
+            var it_focus = server.toplevels.link.prev;
+            while (it_focus != &server.toplevels.link) : (it_focus = it_focus.?.prev) {
+                const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
+
+                // Focus the top window of the monitor your mouse is hovering over
+                if (target.output == c_out and (target.tags & cursor_out_struct.current_tags) != 0) {
+                    server.focusView(target, target.xdg_toplevel.base.surface);
+                    found_focus = true;
+                    break;
+                }
             }
         }
 
@@ -307,6 +322,9 @@ pub const Server = struct {
             state.setMode(mode);
         }
         if (!wlr_output.commitState(&state)) return;
+
+        // Automatically arrange monitors side-by-side from left to right!
+        _ = server.output_layout.addAuto(wlr_output) catch return;
 
         Output.create(server, wlr_output) catch {
             std.log.err("failed to allocate new output", .{});
@@ -349,13 +367,31 @@ pub const Server = struct {
 
         border_node.node.lowerToBottom();
 
+        // Figure out which monitor the mouse is on
+        var active_output = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+        if (active_output == null) {
+            active_output = server.output_layout.outputs.first().?.output;
+        }
+
+        // Grab our custom Output struct so we know what tag this monitor is currently looking at
+        // If data is null, gracefully log the error and clean up memory instead of crashing!
+        const out_data = active_output.?.data orelse {
+            std.log.err("CRITICAL: Monitor data is null! Missing wlr_output.data assignment.", .{});
+            gpa.destroy(toplevel);
+            scene_tree.node.destroy();
+            return;
+        };
+        const out_struct = @as(*Output, @ptrCast(@alignCast(out_data)));
+
         toplevel.* = .{
             .server = server,
             .xdg_toplevel = xdg_toplevel,
             .scene_tree = scene_tree,
             .surface_scene_tree = surface_scene_tree,
             .border_node = border_node,
-            .tags = server.current_tags,
+            // Assign the output and the tags
+            .output = active_output.?,
+            .tags = out_struct.current_tags,
         };
         toplevel.scene_tree.node.data = toplevel;
         xdg_surface.data = toplevel.surface_scene_tree;
@@ -554,7 +590,7 @@ pub const Server = struct {
 
                 while (it != &server.toplevels.link) : (it = it.?.prev) {
                     const check_top: *Toplevel = @fieldParentPtr("link", it.?);
-                    if (check_top == toplevel or (check_top.tags & server.current_tags) == 0) continue;
+                    if (check_top == toplevel or (check_top.tags & server.getActiveTags()) == 0) continue;
 
                     const geom = check_top.xdg_toplevel.base.geometry;
                     const top_x = @as(f64, @floatFromInt(check_top.x));
@@ -674,7 +710,7 @@ pub const Server = struct {
                     // 1. MATCH THE SHADOW'S HITBOX MATH
                     while (it != &server.toplevels.link) : (it = it.?.prev) {
                         const check_top: *Toplevel = @fieldParentPtr("link", it.?);
-                        if (check_top == grabbed or (check_top.tags & server.current_tags) == 0) continue;
+                        if (check_top == grabbed or (check_top.tags & server.getActiveTags()) == 0) continue;
 
                         const geom = check_top.xdg_toplevel.base.geometry;
                         const top_x = @as(f64, @floatFromInt(check_top.x));
@@ -845,14 +881,43 @@ pub const Server = struct {
 
     fn handleLayerShellNewSurface(listener: *wl.Listener(*wlr.LayerSurfaceV1), layer_surface: *wlr.LayerSurfaceV1) void {
         const server: *Server = @fieldParentPtr("layer_shell_new_surface", listener);
-        _ = server; // autofix
 
-        // Waybar/Fuzzel/Swaybg just sent us their surface!
-        // The 'layer_surface' variable now holds the actual Waybar window data.
-        std.log.info("===========================================", .{});
-        std.log.info("A Layer Shell App is knocking on the door!", .{});
-        std.log.info("App namespace: {s}", .{layer_surface.namespace});
-        std.log.info("===========================================", .{});
+        std.log.info("Drawing Layer Shell App: {s}", .{layer_surface.namespace});
+
+        // 1. Assign it to your main monitor
+        if (layer_surface.output == null) {
+            if (server.output_layout.outputs.first()) |layout_output| {
+                layer_surface.output = layout_output.output;
+            } else {
+                return;
+            }
+        }
+
+        // 2. Allocate our new wrapper struct
+        const ls = gpa.create(LayerSurface) catch {
+            std.log.err("Failed to allocate LayerSurface", .{});
+            return;
+        };
+
+        // 3. Add Waybar to the Scene Graph
+        const scene_layer = server.scene.tree.createSceneLayerSurfaceV1(layer_surface) catch {
+            gpa.destroy(ls);
+            std.log.err("Failed to create SceneLayerSurfaceV1", .{});
+            return;
+        };
+
+        // 4. Fill in the struct
+        ls.* = .{
+            .server = server,
+            .layer_surface = layer_surface,
+            .scene_layer = scene_layer,
+        };
+
+        server.layer_surfaces.append(ls);
+
+        // 5. Hook up the listeners (This is what prevents the crash!)
+        layer_surface.surface.events.commit.add(&ls.commit);
+        layer_surface.events.destroy.add(&ls.destroy);
     }
 
     pub fn spawnProgram(server: *Server, cmd: []const u8) !void {
@@ -869,5 +934,82 @@ pub const Server = struct {
 
         // Spawn the process (it runs asynchronously)
         try child.spawn();
+    }
+
+    pub fn arrangeLayers(server: *Server, output: *wlr.Output) void {
+        var full_area: wlr.Box = undefined;
+        _ = server.output_layout.getBox(output, &full_area);
+
+        var usable_area = full_area;
+
+        // Loop through EVERY active bar/dock and shrink the usable_area step-by-step
+        var it = server.layer_surfaces.link.next;
+        while (it != &server.layer_surfaces.link) : (it = it.?.next) {
+            const ls: *LayerSurface = @fieldParentPtr("link", it.?);
+
+            // STRICT SECURITY: Only configure if it's on this monitor AND fully initialized!
+            if (ls.layer_surface.output == output and ls.layer_surface.initialized) {
+                ls.scene_layer.configure(&full_area, &usable_area);
+            }
+        }
+
+        // Now save the perfectly calculated safe zone and tell Lua!
+        if (output.data) |data_ptr| {
+            const out = @as(*Output, @ptrCast(@alignCast(data_ptr)));
+            out.usable_area = usable_area;
+        }
+        server.reTile();
+    }
+    pub fn getActiveTags(server: *Server) u32 {
+        // 1. Where is the mouse?
+        var out = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+        if (out == null) {
+            // Fallback to the first monitor
+            if (server.output_layout.outputs.first()) |lo| {
+                out = lo.output;
+            } else {
+                return 1; // Failsafe: return tag 1
+            }
+        }
+
+        // 2. Return that specific monitor's tag!
+        if (out.?.data) |data| {
+            const out_struct = @as(*Output, @ptrCast(@alignCast(data)));
+            return out_struct.current_tags;
+        }
+
+        return 1;
+    }
+};
+pub const LayerSurface = struct {
+    server: *Server,
+    layer_surface: *wlr.LayerSurfaceV1,
+    scene_layer: *wlr.SceneLayerSurfaceV1,
+
+    link: wl.list.Link = undefined,
+
+    commit: wl.Listener(*wlr.Surface) = .init(handleCommit),
+    destroy: wl.Listener(*wlr.LayerSurfaceV1) = .init(handleDestroy),
+
+    fn handleCommit(listener: *wl.Listener(*wlr.Surface), _: *wlr.Surface) void {
+        const self: *LayerSurface = @fieldParentPtr("commit", listener);
+
+        // If Waybar is fully loaded and ready, tell the layout engine to run!
+        // because probably waybanr says when started that its dimensions are 0x0 then loads
+        // the config which tells how big it should be....
+        // so the resize of the usable space needs to happen in the commit, not in the new layershell
+        if (self.layer_surface.initialized) {
+            self.server.arrangeLayers(self.layer_surface.output.?);
+        }
+    }
+
+    fn handleDestroy(listener: *wl.Listener(*wlr.LayerSurfaceV1), _: *wlr.LayerSurfaceV1) void {
+        const self: *LayerSurface = @fieldParentPtr("destroy", listener);
+
+        self.link.remove();
+        self.server.arrangeLayers(self.layer_surface.output.?);
+        self.commit.link.remove();
+        self.destroy.link.remove();
+        gpa.destroy(self);
     }
 };

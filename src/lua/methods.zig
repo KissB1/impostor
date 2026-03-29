@@ -6,6 +6,8 @@ const lua = @import("../server.zig").lua;
 // Go up one directory to get the Server struct definition
 const Server = @import("../server.zig").Server;
 
+const Output = @import("../output/output.zig").Output;
+
 const keys = @import("../input/keys.zig");
 const wlr = @import("wlroots");
 const Toplevel = @import("../view/toplevel.zig").Toplevel;
@@ -161,10 +163,26 @@ pub fn set_workspace(L: ?*lua.lua_State) callconv(.c) i32 {
     // Get the workspace number from Lua (e.g., 1 to 9)
     const ws_num: u5 = @intCast(lua.lua_tointegerx(L, 1, null));
 
-    // Convert the number to a bitmask (1 -> 0b001, 2 -> 0b010, 3 -> 0b100)
-    server.current_tags = @as(u32, 1) << (ws_num - 1);
+    // --- 1. Find the active monitor! ---
+    // Where is the user's mouse right now?
+    var active_output = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+    if (active_output == null) {
+        // Fallback to the first connected monitor if the mouse is somehow in the void
+        active_output = server.output_layout.outputs.first().?.output;
+    }
 
-    // Retile the screen to hide old windows and show the new ones!
+    // --- 2. Grab our custom Output struct ---
+    // We stored our Output pointer in the wlr_output.data field earlier!
+    const out_data = active_output.?.data orelse return 0;
+
+    // Note: If 'Output' isn't directly imported in this file, use 'server.Output'
+    const out_struct: *Output = @ptrCast(@alignCast(out_data));
+
+    // --- 3. Change the tag ONLY for this monitor ---
+    // Convert the number to a bitmask (1 -> 0b001, 2 -> 0b010)
+    out_struct.current_tags = @as(u32, 1) << (ws_num - 1);
+
+    // 4. Retile the screen to hide old windows and show the new ones!
     server.reTile();
     return 0;
 }
@@ -210,7 +228,7 @@ pub fn focus_direction(L: ?*lua.lua_State) callconv(.c) i32 {
         it = it.?.prev; // Advance early
 
         // Skip if it's the window we are already on, or if it's on a hidden workspace
-        if (target == current or (target.tags & server.current_tags) == 0) continue;
+        if (target == current or (target.tags & server.getActiveTags()) == 0) continue;
 
         // Calculate target's center point
         const target_geom = target.xdg_toplevel.base.geometry;

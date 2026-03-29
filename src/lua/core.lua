@@ -1,3 +1,7 @@
+if not wm then
+    wm = {}
+end
+
 -- lua/core.lua
 wm.setup_chords = function(tree)
     local next_state_id = 1

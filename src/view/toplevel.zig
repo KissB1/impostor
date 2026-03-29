@@ -27,6 +27,9 @@ pub const Toplevel = struct {
     // workspace tag
     tags: u32 = 1,
 
+    // Output for the window
+    output: *wlr.Output,
+
     commit: wl.Listener(*wlr.Surface) = .init(handleCommit),
     map: wl.Listener(void) = .init(handleMap),
     unmap: wl.Listener(void) = .init(handleUnmap),
