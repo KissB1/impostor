@@ -27,6 +27,13 @@ pub const Server = struct {
     allocator: *wlr.Allocator,
     scene: *wlr.Scene,
 
+    // different sceen trees for different purpose windows, like the background
+    bg_tree: *wlr.SceneTree,
+    bottom_tree: *wlr.SceneTree,
+    window_tree: *wlr.SceneTree,
+    top_tree: *wlr.SceneTree,
+    overlay_tree: *wlr.SceneTree,
+
     output_layout: *wlr.OutputLayout,
     scene_output_layout: *wlr.SceneOutputLayout,
     new_output: wl.Listener(*wlr.Output) = .init(newOutput),
@@ -112,6 +119,16 @@ pub const Server = struct {
         const renderer = try wlr.Renderer.autocreate(backend);
         const output_layout = try wlr.OutputLayout.create(wl_server);
         const scene = try wlr.Scene.create();
+        // 1. Background (Wallpapers)
+        const bg_tree = try scene.tree.createSceneTree();
+        // 2. Bottom (Desktop widgets)
+        const bottom_tree = try scene.tree.createSceneTree();
+        // 3. Normal Windows (Kitty, Firefox)
+        const window_tree = try scene.tree.createSceneTree();
+        // 4. Top (Waybar)
+        const top_tree = try scene.tree.createSceneTree();
+        // 5. Overlay (Fuzzel, Notifications)
+        const overlay_tree = try scene.tree.createSceneTree();
         server.* = .{
             .wl_server = wl_server,
             .lua_state = L,
@@ -119,6 +136,11 @@ pub const Server = struct {
             .renderer = renderer,
             .allocator = try wlr.Allocator.autocreate(backend, renderer),
             .scene = scene,
+            .bg_tree = bg_tree,
+            .bottom_tree = bottom_tree,
+            .window_tree = window_tree,
+            .top_tree = top_tree,
+            .overlay_tree = overlay_tree,
             .output_layout = output_layout,
             .scene_output_layout = try scene.attachOutputLayout(output_layout),
             .xdg_shell = try wlr.XdgShell.create(wl_server, 3),
@@ -280,32 +302,46 @@ pub const Server = struct {
         // ==========================================================
         // PASS 3: FOCUS MANAGEMENT (Which monitor is the mouse on?)
         // ==========================================================
-        var cursor_out = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
-        if (cursor_out == null) {
-            if (server.output_layout.outputs.first()) |lo| {
-                cursor_out = lo.output;
+        // --- NEW: The Fuzzel Protector ---
+        // Check if a Layer Shell app currently owns the keyboard!
+        var is_layer_focused = false;
+        var it_ls = server.layer_surfaces.link.next;
+        while (it_ls != &server.layer_surfaces.link) : (it_ls = it_ls.?.next) {
+            const ls: *LayerSurface = @fieldParentPtr("link", it_ls.?);
+            if (ls.layer_surface.surface == server.seat.keyboard_state.focused_surface) {
+                is_layer_focused = true;
+                break;
             }
         }
 
-        var found_focus = false;
-        if (cursor_out) |c_out| {
-            const cursor_out_struct = @as(*Output, @ptrCast(@alignCast(c_out.data.?)));
-
-            var it_focus = server.toplevels.link.prev;
-            while (it_focus != &server.toplevels.link) : (it_focus = it_focus.?.prev) {
-                const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
-
-                // Focus the top window of the monitor your mouse is hovering over
-                if (target.output == c_out and (target.tags & cursor_out_struct.current_tags) != 0) {
-                    server.focusView(target, target.xdg_toplevel.base.surface);
-                    found_focus = true;
-                    break;
+        // Only let reTile touch the keyboard if Fuzzel ISN'T using it!
+        if (!is_layer_focused) {
+            var cursor_out = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+            if (cursor_out == null) {
+                if (server.output_layout.outputs.first()) |lo| {
+                    cursor_out = lo.output;
                 }
             }
-        }
 
-        if (!found_focus) {
-            server.seat.keyboardNotifyClearFocus();
+            var found_focus = false;
+            if (cursor_out) |c_out| {
+                const cursor_out_struct = @as(*Output, @ptrCast(@alignCast(c_out.data.?)));
+
+                var it_focus = server.toplevels.link.prev;
+                while (it_focus != &server.toplevels.link) : (it_focus = it_focus.?.prev) {
+                    const target: *Toplevel = @fieldParentPtr("link", it_focus.?);
+
+                    if (target.output == c_out and (target.tags & cursor_out_struct.current_tags) != 0) {
+                        server.focusView(target, target.xdg_toplevel.base.surface);
+                        found_focus = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found_focus) {
+                server.seat.keyboardNotifyClearFocus();
+            }
         }
     }
 
@@ -344,7 +380,7 @@ pub const Server = struct {
         };
 
         // the color and the witdh of the border already set in the server
-        const scene_tree = server.scene.tree.createSceneTree() catch {
+        const scene_tree = server.window_tree.createSceneTree() catch {
             gpa.destroy(toplevel);
             std.log.err("failed to allocate new toplevel scene tree", .{});
             return;
@@ -584,13 +620,37 @@ pub const Server = struct {
 
                 toplevel.scene_tree.node.setPosition(toplevel.x, toplevel.y);
 
+                // for drag and drop between monitors.
+                if (server.output_layout.outputAt(server.cursor.x, server.cursor.y)) |current_out| {
+                    if (toplevel.output != current_out) {
+                        // The mouse crossed the bezel! Update the window's passport.
+                        toplevel.output = current_out;
+
+                        //const Output = @import("../output/output.zig").Output; // ensure this is imported!
+                        const out_struct = @as(*Output, @ptrCast(@alignCast(current_out.data.?)));
+
+                        // Assign it to the new monitor's active workspace
+                        toplevel.tags = out_struct.current_tags;
+                    }
+                }
+                // ==========================================
+
                 // --- UPDATE THE DROP PREVIEW SHADOW ---
                 var hovered_target: ?*Toplevel = null;
+
+                // Get the monitor the mouse is currently on
+                var current_out = server.output_layout.outputAt(server.cursor.x, server.cursor.y);
+                if (current_out == null) {
+                    if (server.output_layout.outputs.first()) |lo| {
+                        current_out = lo.output;
+                    }
+                }
+
                 var it = server.toplevels.link.prev;
 
                 while (it != &server.toplevels.link) : (it = it.?.prev) {
                     const check_top: *Toplevel = @fieldParentPtr("link", it.?);
-                    if (check_top == toplevel or (check_top.tags & server.getActiveTags()) == 0) continue;
+                    if (check_top == toplevel or check_top.output != current_out.? or (check_top.tags & server.getActiveTags()) == 0) continue;
 
                     const geom = check_top.xdg_toplevel.base.geometry;
                     const top_x = @as(f64, @floatFromInt(check_top.x));
@@ -770,8 +830,9 @@ pub const Server = struct {
                 switch (action) {
                     .move => {
                         server.cursor_mode = .move;
-                        server.grab_x = server.cursor.x - @as(f64, @floatFromInt(res.toplevel.x));
-                        server.grab_y = server.cursor.y - @as(f64, @floatFromInt(res.toplevel.y));
+                        // Inside your interactive move logic in cursorButton:
+                        server.grab_x = server.cursor.x - @as(f64, @floatFromInt(server.grabbed_view.?.scene_tree.node.x));
+                        server.grab_y = server.cursor.y - @as(f64, @floatFromInt(server.grabbed_view.?.scene_tree.node.y));
                     },
                     .resize => {
                         server.cursor_mode = .resize;
@@ -899,8 +960,17 @@ pub const Server = struct {
             return;
         };
 
+        // Read the requested layer and route it!
+        const target_tree = switch (layer_surface.pending.layer) {
+            .background => server.bg_tree,
+            .bottom => server.bottom_tree,
+            .top => server.top_tree,
+            .overlay => server.overlay_tree,
+            else => server.top_tree,
+        };
+
         // 3. Add Waybar to the Scene Graph
-        const scene_layer = server.scene.tree.createSceneLayerSurfaceV1(layer_surface) catch {
+        const scene_layer = target_tree.createSceneLayerSurfaceV1(layer_surface) catch {
             gpa.destroy(ls);
             std.log.err("Failed to create SceneLayerSurfaceV1", .{});
             return;
@@ -1000,6 +1070,21 @@ pub const LayerSurface = struct {
         // so the resize of the usable space needs to happen in the commit, not in the new layershell
         if (self.layer_surface.initialized) {
             self.server.arrangeLayers(self.layer_surface.output.?);
+        }
+
+        // If Fuzzel asks for the keyboard, we must explicitly hand it over!
+        if (self.layer_surface.current.keyboard_interactive != .none) {
+
+            // Only send the focus event if it doesn't already have it
+            if (self.server.seat.keyboard_state.focused_surface != self.layer_surface.surface) {
+                if (self.server.seat.getKeyboard()) |wlr_keyboard| {
+                    self.server.seat.keyboardNotifyEnter(
+                        self.layer_surface.surface,
+                        wlr_keyboard.keycodes[0..wlr_keyboard.num_keycodes],
+                        &wlr_keyboard.modifiers,
+                    );
+                }
+            }
         }
     }
 
